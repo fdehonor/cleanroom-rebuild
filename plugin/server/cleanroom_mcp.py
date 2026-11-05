@@ -10,9 +10,14 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+SERVER_DIR = Path(__file__).resolve().parent
+if str(SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVER_DIR))
+from agent_scheduler import choose_plan, detect_providers, run_plan
+
 
 SERVER_NAME = "cleanroom-engine"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 STATUS_RESOURCE_URI = "ui://cleanroom-rebuild/status-dashboard-v1.html"
 TOKEN_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*|0x[0-9A-Fa-f]+|\d+(?:\.\d+)?|"
@@ -196,6 +201,42 @@ TOOLS = [
         "name": "cleanroom_status",
         "description": "Report clean-room project state, evidence counts, generated artifacts, and review status.",
         "inputSchema": _schema({"project_root": {"type": "string"}}, ["project_root"]),
+    },
+    {
+        "name": "cleanroom_agent_plan",
+        "description": "Automatically choose Codex, Claude, and/or Gemini roles using risk and time budgets without calling a model.",
+        "inputSchema": _schema(
+            {
+                "project_root": {"type": "string"},
+                "task": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "risk": {"type": "string", "enum": ["low", "medium", "high"], "default": "medium"},
+                "mode": {"type": "string", "enum": ["auto", "single", "dual", "triple"], "default": "auto"},
+                "time_budget_minutes": {"type": "integer", "minimum": 2, "maximum": 480, "default": 30},
+            },
+            ["project_root", "task"],
+        ),
+        "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "cleanroom_agent_run",
+        "description": "Run the automatic Codex writer and optional parallel Claude/Gemini read-only reviewers from the sanitized handoff.",
+        "inputSchema": _schema(
+            {
+                "project_root": {"type": "string"},
+                "task": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "risk": {"type": "string", "enum": ["low", "medium", "high"], "default": "medium"},
+                "mode": {"type": "string", "enum": ["auto", "single", "dual", "triple"], "default": "auto"},
+                "time_budget_minutes": {"type": "integer", "minimum": 2, "maximum": 480, "default": 30},
+                "max_turns": {"type": "integer", "minimum": 1, "maximum": 50, "default": 8},
+            },
+            ["project_root", "task"],
+        ),
+    },
+    {
+        "name": "cleanroom_agent_status",
+        "description": "Read installed provider availability and prior agent-run results without calling a model.",
+        "inputSchema": _schema({"project_root": {"type": "string"}}, ["project_root"]),
+        "annotations": {"readOnlyHint": True},
     },
     {
         "name": "llm4decompile_status",
@@ -774,6 +815,48 @@ def _status(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _agent_plan(args: dict[str, Any]) -> dict[str, Any]:
+    _, state = _state_root(args["project_root"])
+    if not (state / "handoff" / "specification.json").is_file():
+        raise ValueError("generate the behavior-only handoff before planning implementation agents")
+    plan = choose_plan(
+        args["task"],
+        args.get("risk", "medium"),
+        args.get("mode", "auto"),
+        int(args.get("time_budget_minutes", 30)),
+    )
+    _atomic_json(state / "agents" / "plan.json", plan)
+    return plan
+
+
+def _agent_run(args: dict[str, Any]) -> dict[str, Any]:
+    root, state = _state_root(args["project_root"])
+    handoff_path = state / "handoff" / "specification.json"
+    if not handoff_path.is_file():
+        raise ValueError("generate the behavior-only handoff before running implementation agents")
+    plan = _agent_plan(args)
+    result = run_plan(
+        str(root),
+        plan,
+        handoff_path.read_text(encoding="utf-8"),
+        int(args.get("max_turns", 8)),
+    )
+    _atomic_json(state / "agents" / "latest.json", result)
+    return result
+
+
+def _agent_status(args: dict[str, Any]) -> dict[str, Any]:
+    _, state = _state_root(args["project_root"])
+    runs = sorted((state / "agents").glob("run-*/result.json"), reverse=True) if (state / "agents").is_dir() else []
+    return {
+        "providers": detect_providers(),
+        "plan": _read_json(state / "agents" / "plan.json", None),
+        "latest": _read_json(state / "agents" / "latest.json", None),
+        "run_count": len(runs),
+        "no_llm_used": True,
+    }
+
+
 def _dashboard(args: dict[str, Any]) -> dict[str, Any]:
     projects = _recent_projects()
     requested = (args.get("project_root") or "").strip()
@@ -805,6 +888,8 @@ def _dashboard(args: dict[str, Any]) -> dict[str, Any]:
     candidate = _read_json(state / "verification" / "release-candidate.json", None)
     gate = _read_json(state / "verification" / "release-gate.json", None)
     fingerprints = _read_json(state / "analysis" / "reference_fingerprints.json", {"references": []}).get("references", [])
+    agent_plan = _read_json(state / "agents" / "plan.json", None)
+    agent_latest = _read_json(state / "agents" / "latest.json", None)
     handoff_ready = (state / "handoff" / "specification.json").is_file()
     plan_ready = (state / "implementation" / "plan.json").is_file()
     implementation_files = list(_source_files(state / "implementation"))
@@ -922,6 +1007,11 @@ def _dashboard(args: dict[str, Any]) -> dict[str, Any]:
         "release_ready": gate is not None and gate.get("release_ready") is True,
         "blockers": [] if gate is not None and gate.get("release_ready") is True else blockers,
         "recent_activity": activity[:20],
+        "agents": {
+            "providers": detect_providers(),
+            "plan": agent_plan,
+            "latest": agent_latest,
+        },
         "runtime": _llm_status({}),
     }
 
@@ -1067,6 +1157,9 @@ HANDLERS = {
     "cleanroom_register_release_candidate": _register_release,
     "cleanroom_release_gate": _release_gate,
     "cleanroom_status": _status,
+    "cleanroom_agent_plan": _agent_plan,
+    "cleanroom_agent_run": _agent_run,
+    "cleanroom_agent_status": _agent_status,
     "llm4decompile_status": _llm_status,
     "llm4decompile_refine": _llm_refine,
     "llm4decompile_assembly": _llm_assembly,

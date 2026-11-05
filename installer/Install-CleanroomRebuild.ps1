@@ -2,6 +2,8 @@
 param(
     [switch]$DownloadModels,
     [switch]$AcceptThirdPartyLicenses,
+    [ValidateSet('All','CodexOnly','ExistingOnly')]
+    [string]$AgentProviders = 'All',
     [ValidateSet('Recommended','Full','ExistingOnly')]
     [string]$IDEProfile = 'Recommended'
 )
@@ -185,6 +187,16 @@ try {
     $reaModule = Join-Path $npmPrefix 'node_modules\rea-agents\scripts\rea.mjs'
     Invoke-Checked $reaCmd @('setup', '--client', 'codex', '--skill', '--yes', '--format', 'json')
 
+    Write-Step 'Installing automatic Codex, Claude, and Gemini coding-agent support'
+    if ($AgentProviders -eq 'All') {
+        Invoke-Checked $npm @('install', '--global', '@anthropic-ai/claude-code', '@google/gemini-cli')
+    }
+    $claude = Find-Program @('claude.cmd', 'claude.exe', 'claude')
+    $gemini = Find-Program @('gemini.cmd', 'gemini.exe', 'gemini')
+    if ($AgentProviders -eq 'All' -and (-not $claude -or -not $gemini)) {
+        throw 'Claude Code or Gemini CLI did not install correctly. Check the npm global binary directory in PATH.'
+    }
+
     Write-Step 'Cloning the three source repositories'
     Ensure-Clone $git 'https://github.com/albertan017/LLM4Decompile.git' (Join-Path $sourceRoot 'LLM4Decompile')
     Ensure-Clone $git 'https://github.com/cyberkaida/reverse-engineering-assistant.git' (Join-Path $sourceRoot 'reverse-engineering-assistant')
@@ -228,12 +240,17 @@ try {
     Invoke-Checked $python @('-c', 'import torch,transformers,jpype; print(torch.__version__, transformers.__version__, jpype.__version__)')
     Invoke-Checked $gpuPython @('-c', 'import torch,torch_directml; d=torch_directml.device(); x=torch.tensor([1.0]).to(d); assert (x+x).cpu().item()==2.0; print(torch_directml.device_name(0))')
     Invoke-Checked $reaCmd @('doctor', '--client', 'codex', '--provider', 'ghidra', '--format', 'json')
+    Invoke-Checked $codex @('--version')
+    if ($claude) { Invoke-Checked $claude @('--version') }
+    if ($gemini) { Invoke-Checked $gemini @('--version') }
     Invoke-Checked (Join-Path $jdkHome 'bin\java.exe') @('-version')
     if (-not (Test-Path -LiteralPath (Join-Path $ghidraHome 'support\analyzeHeadless.bat'))) { throw 'Ghidra headless launcher is missing.' }
     if (-not (Test-Path -LiteralPath $revaExtensionHome)) { throw 'ReVa Ghidra extension is missing.' }
 
     Write-Host "`nREADY. Close and reopen Codex, then ask: 'Start a clean-room rebuild project and analyze my authorized binary with Ghidra.'" -ForegroundColor Green
     Write-Host "IDE workspace: $(Join-Path $toolsRoot 'workspace\Cleanroom-Rebuild.code-workspace')"
+    if ($claude) { Write-Host "One-time Claude sign-in: claude" -ForegroundColor Yellow }
+    if ($gemini) { Write-Host "One-time Gemini sign-in: gemini" -ForegroundColor Yellow }
     Write-Host "Install log: $logPath"
 }
 catch {

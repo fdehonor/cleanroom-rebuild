@@ -41,10 +41,16 @@ flowchart TB
 
     subgraph IMPLEMENT[Independent implementation plane]
       HANDOFF --> PLAN[Generate implementation and contract-test plan]
-      PLAN --> IDE[Prepared IDE workspace and Codex extension]
+      PLAN --> ROUTER{Risk, installed providers, and time budget}
+      ROUTER -->|Low risk or under 10 min| C1[Codex only]
+      ROUTER -->|Normal work| C2[Codex writer plus one reviewer]
+      ROUTER -->|High risk and 20+ min| C3[Codex writer plus Claude and Gemini reviewers]
+      C1 & C2 & C3 --> IDE[Prepared IDE workspace and provider instructions]
       IDE --> TESTFIRST[Create black-box contract tests]
       TESTFIRST --> BUILD[Implement independent code and assets]
       BUILD --> ARTIFACT[Build runnable candidate]
+      ARTIFACT --> REVIEW[Parallel read-only independent reviews]
+      REVIEW --> ARTIFACT
     end
 
     subgraph VERIFY[Verification and release plane]

@@ -25,8 +25,9 @@ Do not use a percentage-of-difference rule. Similarity checks are review signals
 5. Record only observable facts with `cleanroom_record_observation`. Keep statements compact and attach interface facts and black-box test vectors.
 6. When reference code is visible in the analysis room, call `cleanroom_register_reference_fingerprint`; the engine stores hashes, not the code.
 7. Call `cleanroom_generate_handoff`, then `cleanroom_plan_implementation`. Begin implementation from those artifacts in `.cleanroom/handoff` and `.cleanroom/implementation`.
-8. Validate behavior with tests derived from the handoff. Record executed evidence with `cleanroom_record_validation`, register the built artifacts with `cleanroom_register_release_candidate`, and call `cleanroom_check_similarity`.
-9. Call `cleanroom_release_gate`. Do not describe the work as complete unless it returns `release_ready: true`. Partial implementations, unexecuted tests, missing release artifacts, and unresolved similarity flags are incomplete.
+8. Call `cleanroom_agent_plan` before implementation. Prefer `mode=auto`: one agent for low-risk short work, Codex plus one reviewer for normal work, and all three providers for high-risk release milestones when the time budget permits. Use `cleanroom_agent_run` to execute the bounded plan. Codex is the sole writer; Claude and Gemini are independent read-only reviewers.
+9. Validate behavior with tests derived from the handoff. Record executed evidence with `cleanroom_record_validation`, register the built artifacts with `cleanroom_register_release_candidate`, and call `cleanroom_check_similarity`.
+10. Call `cleanroom_release_gate`. Do not describe the work as complete unless it returns `release_ready: true`. Partial implementations, unexecuted tests, missing release artifacts, and unresolved similarity flags are incomplete.
 
 ## Handoff quality
 

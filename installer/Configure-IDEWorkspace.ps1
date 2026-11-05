@@ -100,6 +100,7 @@ $tasks = @{
         @{ label='Cleanroom: REA health check'; type='shell'; command='rea doctor --client codex --provider ghidra --format json'; problemMatcher=@() },
         @{ label='Cleanroom: Start Ghidra'; type='shell'; command='& "$env:GHIDRA_INSTALL_DIR\ghidraRun.bat"'; problemMatcher=@() },
         @{ label='Cleanroom: Show MCP registrations'; type='shell'; command='codex mcp list'; problemMatcher=@() }
+        @{ label='Cleanroom: Check coding agents'; type='shell'; command='codex --version; claude --version; gemini --version'; problemMatcher=@() }
     )
 }
 $tasks | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $vscodeRoot 'tasks.json') -Encoding utf8
@@ -147,6 +148,8 @@ Open the Clean-room Live Status app in Codex for direct, zero-LLM progress.
 Do not call work complete until `cleanroom_release_gate` returns release-ready.
 '@
 $agents | Set-Content -LiteralPath (Join-Path $workspaceRoot 'AGENTS.md') -Encoding utf8
+$agents.Replace('Codex','Claude Code') | Set-Content -LiteralPath (Join-Path $workspaceRoot 'CLAUDE.md') -Encoding utf8
+$agents.Replace('Codex','Gemini CLI') | Set-Content -LiteralPath (Join-Path $workspaceRoot 'GEMINI.md') -Encoding utf8
 
 $readme = @"
 # Cleanroom Rebuild coding workspace
@@ -157,7 +160,9 @@ Visual Studio users can import `Cleanroom-Rebuild.vsconfig` to install the C++,
 configuration in `.run`.
 
 The official Codex extension is installed in detected VS Code-compatible
-editors. Codex CLI, desktop, and the IDE extension share the same MCP config.
+editors. The clean-room scheduler uses Codex as its isolated writer and can
+run Claude Code and Gemini CLI as parallel read-only reviewers. Each optional
+provider requires its own account and one-time sign-in.
 "@
 $readme | Set-Content -LiteralPath (Join-Path $workspaceRoot 'README.md') -Encoding utf8
 

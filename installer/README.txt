@@ -1,4 +1,4 @@
-CLEANROOM REBUILD 0.3.0 — PUBLIC WINDOWS INSTALLER
+CLEANROOM REBUILD 0.4.0 — PUBLIC WINDOWS INSTALLER
 
 This installer may be used free of charge under its MIT License. Components it
 downloads retain their own licenses. Read THIRD-PARTY-NOTICES.md first.
@@ -12,6 +12,7 @@ What it installs
 - GPU-first inference with CPU fallback and automatic eGPU discovery
 - A ready coding workspace with the official Codex extension and IDE tasks
 - A model-free live status app in Codex with two-second progress refresh
+- Codex, Claude Code, and Gemini CLI automatic task routing
 
 How to install
 --------------
@@ -20,7 +21,9 @@ How to install
 3. Review the displayed third-party terms and type AGREE if you accept them.
 4. Wait for the green READY message. Large downloads can take time.
 5. Close and reopen Codex.
-6. In Codex, ask:
+6. Run `claude` and `gemini` once if you want those optional reviewers, and
+   complete each provider's separate sign-in.
+7. In Codex, ask:
    Start a clean-room rebuild project and analyze my authorized binary with Ghidra.
 
 IDE setup
@@ -63,6 +66,13 @@ reverse-engineering observations from implementation, stores only hashed source
 fingerprints for similarity review, and blocks release until the feature inventory,
 compatibility coverage, nine validation classes, packaging, and a Beta-or-better
 artifact all pass. These engineering checks are not legal clearance.
+
+Agent efficiency
+----------------
+Codex is the only implementation writer. Normal work uses Codex plus one available
+reviewer. Short low-risk jobs use Codex alone. High-risk release milestones use
+Codex, Claude, and Gemini when installed and the time budget is at least 20 minutes.
+Reviewers run in parallel, time out cleanly, and cannot override the release gate.
 
 Public-use boundary
 -------------------

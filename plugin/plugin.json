@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "cleanroom-rebuild",
-  "version": "0.3.0",
-  "description": "Evidence-driven clean-room reconstruction with a zero-LLM live status dashboard.",
+  "version": "0.4.0",
+  "description": "Evidence-driven clean-room reconstruction with automatic Codex, Claude, and Gemini orchestration.",
   "author": {
     "name": "Cleanroom Rebuild contributors"
   },

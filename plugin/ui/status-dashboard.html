@@ -28,6 +28,7 @@
     .inventory { grid-column:span 6; }
     .activity { grid-column:span 7; }
     .runtime { grid-column:span 5; }
+    .agents { grid-column:span 12; }
     .bar { height:12px; background:#090d18; border:1px solid var(--line); border-radius:99px; overflow:hidden; margin:10px 0 7px; }
     .bar > div { height:100%; background:linear-gradient(90deg,var(--blue),var(--green)); transition:width .35s ease; }
     .stats { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; margin-top:12px; }
@@ -104,6 +105,12 @@
       var validations = snapshot.validations || [];
       var inventory = snapshot.inventory || [];
       var runtime = snapshot.runtime || {};
+      var agents = snapshot.agents || {};
+      var providerRows = (agents.providers||[]).map(function (item) {
+        return '<tr><td>'+esc(item.name)+'</td><td>'+badge(item.available?'available':'missing')+'</td><td class="muted">'+esc(item.executable||'Install or configure PATH')+'</td></tr>';
+      }).join('');
+      var selected = agents.plan && agents.plan.selected ? agents.plan.selected.join(' → ') : 'Not planned yet';
+      var runStatus = agents.latest ? agents.latest.status : 'not run';
       content.className = 'grid';
       content.innerHTML =
         '<section class="panel overview"><div class="row" style="justify-content:space-between"><div><h2>'+esc(snapshot.project.name)+'</h2><p class="muted">'+esc(snapshot.project.goal)+'</p><code>'+esc(snapshot.project.root)+'</code></div><div class="release '+(snapshot.release_ready?'complete':'warning')+'">'+(snapshot.release_ready?'RELEASE READY':'NOT RELEASE READY')+'</div></div><div class="bar"><div style="width:'+esc(p.percent)+'%"></div></div><b>'+esc(p.percent)+'%</b> · '+esc(p.completed_steps)+' of '+esc(p.total_steps)+' milestones complete<div class="stats"><div class="stat"><b>'+value(snapshot,'observations')+'</b><span class="muted">Observations</span></div><div class="stat"><b>'+value(snapshot,'verified_inventory_items')+'/'+value(snapshot,'inventory_items')+'</b><span class="muted">Features verified</span></div><div class="stat"><b>'+value(snapshot,'covered_observations')+'/'+value(snapshot,'required_observations')+'</b><span class="muted">Behavior covered</span></div><div class="stat"><b>'+value(snapshot,'passing_validation_kinds')+'/9</b><span class="muted">Validation classes</span></div><div class="stat"><b>'+value(snapshot,'implementation_files')+'</b><span class="muted">Implementation files</span></div></div></section>'+
@@ -112,7 +119,8 @@
         '<section class="panel validations"><h2>Validation matrix</h2><table><thead><tr><th>Class</th><th>Status</th><th>Latest evidence</th></tr></thead><tbody>'+validations.map(function (item) { return '<tr><td>'+esc(item.kind)+'</td><td>'+badge(item.status)+'</td><td class="muted">'+esc(item.name||'Not run')+'</td></tr>'; }).join('')+'</tbody></table></section>'+
         '<section class="panel inventory"><h2>Feature and workflow inventory</h2>'+(inventory.length?'<ul>'+inventory.slice(0,50).map(function (item) { return '<li><div class="row">'+badge(item.status)+'<b>'+esc(item.name)+'</b></div><span class="muted">'+esc(item.kind)+' · '+esc((item.observation_ids||[]).length)+' observation(s)</span></li>'; }).join('')+'</ul>':'<p class="muted">No inventory items recorded.</p>')+'</section>'+
         '<section class="panel activity"><h2>Recent activity</h2><ul>'+(snapshot.recent_activity||[]).map(function (item) { return '<li><div class="row">'+badge(item.status||item.type)+'<span>'+esc(item.label)+'</span></div><span class="muted">'+esc(item.time||'')+'</span></li>'; }).join('')+'</ul></section>'+
-        '<section class="panel runtime"><h2>Compute runtime</h2><p><b>GPU first:</b> '+esc(runtime.gpu_first)+'</p><p><b>CPU fallback:</b> '+esc(runtime.cpu_fallback)+'</p><p><b>Priority:</b> '+esc((runtime.backend_priority||[]).join(' → '))+'</p><p><b>Adapters:</b> '+esc((runtime.accelerators||[]).map(function (item) { return item.name; }).join(', ')||'CPU only')+'</p><p class="muted">This dashboard polls the MCP server directly and does not invoke a language model.</p></section>';
+        '<section class="panel runtime"><h2>Compute runtime</h2><p><b>GPU first:</b> '+esc(runtime.gpu_first)+'</p><p><b>CPU fallback:</b> '+esc(runtime.cpu_fallback)+'</p><p><b>Priority:</b> '+esc((runtime.backend_priority||[]).join(' → '))+'</p><p><b>Adapters:</b> '+esc((runtime.accelerators||[]).map(function (item) { return item.name; }).join(', ')||'CPU only')+'</p><p class="muted">This dashboard polls the MCP server directly and does not invoke a language model.</p></section>'+
+        '<section class="panel agents"><h2>Automatic coding agents</h2><p><b>Selected route:</b> '+esc(selected)+'</p><p><b>Latest run:</b> '+badge(runStatus)+'</p><table><thead><tr><th>Provider</th><th>Status</th><th>Executable</th></tr></thead><tbody>'+providerRows+'</tbody></table><p class="muted">Codex is the single writer. Claude and Gemini review in parallel when risk and time budget justify them.</p></section>';
     }
 
     function unpack(response) {

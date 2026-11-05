@@ -4,12 +4,13 @@ Cleanroom Rebuild is a Windows-first Codex plugin and installer for authorized, 
 
 ## What is included
 
-- A 15-tool local MCP server for clean-room project state, evidence, similarity review, validation, and release gating.
+- An 18-tool local MCP server for clean-room project state, evidence, multi-agent scheduling, similarity review, validation, and release gating.
 - A zero-LLM live status app that opens from Codex navigation or a conversation and polls local state every two seconds.
 - GPU-first LLM4Decompile inference with CUDA/eGPU, Intel XPU, DirectML, and CPU fallback.
 - A one-click installer for Ghidra/ReVa, REA, model runtime, and Codex registration.
 - VS Code/Cursor/Windsurf setup with the official Codex extension and a ready multi-repository workspace.
 - Optional Visual Studio Community, PyCharm Community, and IntelliJ IDEA Community setup.
+- Automatic provider routing: Codex writes; Claude Code and Gemini CLI perform bounded, parallel read-only reviews when risk and time justify them.
 
 ## Install
 
@@ -18,6 +19,8 @@ Download a release archive, extract it, and double-click `Install Cleanroom Rebu
 Restart Codex after installation. Open **Clean-room Live Status** from the plugin navigation, or start with:
 
 > Start an authorized clean-room rebuild project, analyze the supplied binary with Ghidra, inventory every observable feature and workflow, and continue until the Beta release gate passes.
+
+The installer also installs the Claude Code and Gemini CLIs by default. Run `claude` and `gemini` once to complete their separate account sign-ins. The system remains usable with Codex alone; normal work selects two available providers, short low-risk work selects one, and high-risk release work selects all three when installed and within the time budget.
 
 ## Architecture and automation
 

@@ -11,6 +11,8 @@
 
 The orchestration skill selects analysis providers, records sanitized observations, maintains the feature inventory, generates the implementation plan, tracks executed validation evidence, checks hashed-token similarity, registers release artifacts, and evaluates the hard gate. The IDE configurator prepares editor extensions, compiler/build tools, tasks, and a shared workspace.
 
+The coding-agent scheduler detects Codex, Claude Code, and Gemini CLI without a model call. In automatic mode it chooses one provider for short/low-risk work, two for normal work, and three for high-risk work when at least 20 minutes are available. Codex is the only writer. Independent reviewers run concurrently and cannot approve or override the deterministic release gate. Missing or unauthenticated optional providers produce a visible degraded plan instead of blocking Codex-only operation.
+
 The status application reads state directly from disk every two seconds. Its refresh path is `MCP App → cleanroom_dashboard → local JSON/JSONL`; it does not invoke Codex or another model.
 
 ## Intelligence boundaries
@@ -25,6 +27,7 @@ Codex and LLM4Decompile may assist analysis and implementation. Deterministic to
 - Similarity flags require independent rewrite or explicit human review.
 - Missing feature coverage routes back to discovery, not directly to packaging.
 - A process interruption leaves append-only observations and validations on disk for resumption.
+- Provider timeouts and nonzero exits are stored under `.cleanroom/agents`; a failed reviewer is never recorded as agreement.
 
 ## Completion definition
 
