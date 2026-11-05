@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Clean-room Live Status</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#0b1020; --panel:#131a2d; --text:#eef2ff; --muted:#9aa6c0; --line:#29334d; --green:#44d19d; --blue:#6ea8fe; --amber:#f0b35a; --red:#ff7188; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
+    main { width:min(1400px,100%); margin:auto; padding:18px; }
+    header { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; margin-bottom:14px; }
+    h1,h2,h3,p { margin:0; }
+    h1 { font-size:22px; }
+    h2 { font-size:15px; margin-bottom:10px; }
+    .muted { color:var(--muted); }
+    .live { display:flex; align-items:center; gap:7px; color:var(--green); white-space:nowrap; }
+    .dot { width:9px; height:9px; border-radius:50%; background:currentColor; box-shadow:0 0 0 4px #44d19d22; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:14px 0; }
+    select,button { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+    button { cursor:pointer; }
+    .grid { display:grid; grid-template-columns:repeat(12,1fr); gap:12px; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; min-width:0; }
+    .overview { grid-column:span 12; }
+    .steps { grid-column:span 7; }
+    .blockers { grid-column:span 5; }
+    .validations { grid-column:span 6; }
+    .inventory { grid-column:span 6; }
+    .activity { grid-column:span 7; }
+    .runtime { grid-column:span 5; }
+    .bar { height:12px; background:#090d18; border:1px solid var(--line); border-radius:99px; overflow:hidden; margin:10px 0 7px; }
+    .bar > div { height:100%; background:linear-gradient(90deg,var(--blue),var(--green)); transition:width .35s ease; }
+    .stats { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; margin-top:12px; }
+    .stat { padding:9px; border:1px solid var(--line); border-radius:9px; }
+    .stat b { display:block; font-size:18px; }
+    ul { list-style:none; padding:0; margin:0; }
+    li { padding:7px 0; border-bottom:1px solid var(--line); }
+    li:last-child { border-bottom:0; }
+    .row { display:flex; align-items:flex-start; gap:9px; }
+    .badge { display:inline-flex; padding:2px 7px; border-radius:99px; font-size:11px; border:1px solid currentColor; white-space:nowrap; }
+    .complete,.passed,.verified { color:var(--green); }
+    .active { color:var(--blue); }
+    .pending { color:var(--muted); }
+    .failed,.blocked { color:var(--red); }
+    .warning { color:var(--amber); }
+    .release { font-weight:700; font-size:16px; }
+    .empty { padding:36px 18px; text-align:center; }
+    code { word-break:break-all; color:#c5d5ff; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { text-align:left; padding:7px 5px; border-bottom:1px solid var(--line); vertical-align:top; }
+    th { color:var(--muted); font-weight:500; }
+    @media (max-width:850px) { .steps,.blockers,.validations,.inventory,.activity,.runtime { grid-column:span 12; } .stats { grid-template-columns:repeat(2,1fr); } }
+  </style>
+</head>
+<body>
+<main>
+  <header><div><h1>Clean-room Live Status</h1><p class="muted">Direct local state · no language-model calls</p></div><div class="live"><span class="dot"></span><span id="connection">Connecting</span></div></header>
+  <div class="toolbar"><label for="projects" class="muted">Project</label><select id="projects"></select><button id="refresh" type="button">Refresh now</button><span class="muted" id="updated"></span></div>
+  <div id="content" class="panel empty">Waiting for workflow state…</div>
+</main>
+<script>
+  (function () {
+    var nextId = 1;
+    var pending = new Map();
+    var selectedRoot = '';
+    var initialized = false;
+    var interval = null;
+
+    function send(method, params) {
+      return new Promise(function (resolve, reject) {
+        var id = nextId++;
+        pending.set(id, {resolve:resolve,reject:reject});
+        window.parent.postMessage({jsonrpc:'2.0',id:id,method:method,params:params||{}}, '*');
+        setTimeout(function () { if (pending.has(id)) { pending.delete(id); reject(new Error('Host request timed out')); } }, 15000);
+      });
+    }
+
+    function esc(value) {
+      return String(value == null ? '' : value).replace(/[&<>"']/g, function (character) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]; });
+    }
+
+    function badge(status) { return '<span class="badge '+esc(status)+'">'+esc(status)+'</span>'; }
+    function value(snapshot, key) { return snapshot.counts && snapshot.counts[key] != null ? snapshot.counts[key] : 0; }
+
+    function render(snapshot) {
+      var content = document.getElementById('content');
+      document.getElementById('updated').textContent = snapshot.refreshed_at ? 'Updated '+snapshot.refreshed_at : '';
+      document.getElementById('connection').textContent = 'Live · 2 second refresh';
+      if (!snapshot.configured) {
+        content.className = 'panel empty';
+        content.innerHTML = '<h2>No project yet</h2><p class="muted">Initialize a clean-room project in Codex. It will appear here automatically.</p>';
+        return;
+      }
+      var select = document.getElementById('projects');
+      var projectSignature = (snapshot.projects||[]).map(function (p) { return p.project_root; }).join('|');
+      if (select.dataset.signature !== projectSignature) {
+        select.innerHTML = (snapshot.projects||[]).map(function (p) { return '<option value="'+esc(p.project_root)+'">'+esc(p.project_name)+' — '+esc(p.project_root)+'</option>'; }).join('');
+        select.dataset.signature = projectSignature;
+      }
+      select.value = snapshot.project.root;
+      selectedRoot = snapshot.project.root;
+      var p = snapshot.progress;
+      var blockers = snapshot.blockers || [];
+      var validations = snapshot.validations || [];
+      var inventory = snapshot.inventory || [];
+      var runtime = snapshot.runtime || {};
+      content.className = 'grid';
+      content.innerHTML =
+        '<section class="panel overview"><div class="row" style="justify-content:space-between"><div><h2>'+esc(snapshot.project.name)+'</h2><p class="muted">'+esc(snapshot.project.goal)+'</p><code>'+esc(snapshot.project.root)+'</code></div><div class="release '+(snapshot.release_ready?'complete':'warning')+'">'+(snapshot.release_ready?'RELEASE READY':'NOT RELEASE READY')+'</div></div><div class="bar"><div style="width:'+esc(p.percent)+'%"></div></div><b>'+esc(p.percent)+'%</b> · '+esc(p.completed_steps)+' of '+esc(p.total_steps)+' milestones complete<div class="stats"><div class="stat"><b>'+value(snapshot,'observations')+'</b><span class="muted">Observations</span></div><div class="stat"><b>'+value(snapshot,'verified_inventory_items')+'/'+value(snapshot,'inventory_items')+'</b><span class="muted">Features verified</span></div><div class="stat"><b>'+value(snapshot,'covered_observations')+'/'+value(snapshot,'required_observations')+'</b><span class="muted">Behavior covered</span></div><div class="stat"><b>'+value(snapshot,'passing_validation_kinds')+'/9</b><span class="muted">Validation classes</span></div><div class="stat"><b>'+value(snapshot,'implementation_files')+'</b><span class="muted">Implementation files</span></div></div></section>'+
+        '<section class="panel steps"><h2>Workflow steps</h2><ul>'+p.steps.map(function (step) { return '<li class="row">'+badge(step.status)+'<span>'+esc(step.label)+'</span></li>'; }).join('')+'</ul></section>'+
+        '<section class="panel blockers"><h2>Release blockers</h2>'+(blockers.length?'<ul>'+blockers.map(function (item) { return '<li class="row"><span class="blocked">●</span><span>'+esc(item)+'</span></li>'; }).join('')+'</ul>':'<p class="complete">No engineering blockers.</p>')+'</section>'+
+        '<section class="panel validations"><h2>Validation matrix</h2><table><thead><tr><th>Class</th><th>Status</th><th>Latest evidence</th></tr></thead><tbody>'+validations.map(function (item) { return '<tr><td>'+esc(item.kind)+'</td><td>'+badge(item.status)+'</td><td class="muted">'+esc(item.name||'Not run')+'</td></tr>'; }).join('')+'</tbody></table></section>'+
+        '<section class="panel inventory"><h2>Feature and workflow inventory</h2>'+(inventory.length?'<ul>'+inventory.slice(0,50).map(function (item) { return '<li><div class="row">'+badge(item.status)+'<b>'+esc(item.name)+'</b></div><span class="muted">'+esc(item.kind)+' · '+esc((item.observation_ids||[]).length)+' observation(s)</span></li>'; }).join('')+'</ul>':'<p class="muted">No inventory items recorded.</p>')+'</section>'+
+        '<section class="panel activity"><h2>Recent activity</h2><ul>'+(snapshot.recent_activity||[]).map(function (item) { return '<li><div class="row">'+badge(item.status||item.type)+'<span>'+esc(item.label)+'</span></div><span class="muted">'+esc(item.time||'')+'</span></li>'; }).join('')+'</ul></section>'+
+        '<section class="panel runtime"><h2>Compute runtime</h2><p><b>GPU first:</b> '+esc(runtime.gpu_first)+'</p><p><b>CPU fallback:</b> '+esc(runtime.cpu_fallback)+'</p><p><b>Priority:</b> '+esc((runtime.backend_priority||[]).join(' → '))+'</p><p><b>Adapters:</b> '+esc((runtime.accelerators||[]).map(function (item) { return item.name; }).join(', ')||'CPU only')+'</p><p class="muted">This dashboard polls the MCP server directly and does not invoke a language model.</p></section>';
+    }
+
+    function unpack(response) {
+      if (response && response.structuredContent) return response.structuredContent;
+      if (response && response.result && response.result.structuredContent) return response.result.structuredContent;
+      return response;
+    }
+
+    async function refresh() {
+      try {
+        var result = await send('tools/call', {name:'cleanroom_dashboard',arguments:selectedRoot?{project_root:selectedRoot}:{}});
+        render(unpack(result));
+      } catch (error) {
+        document.getElementById('connection').textContent = 'Disconnected';
+        document.getElementById('content').className = 'panel empty';
+        document.getElementById('content').textContent = error.message;
+      }
+    }
+
+    window.addEventListener('message', function (event) {
+      if (event.source !== window.parent) return;
+      var message = event.data;
+      if (!message || message.jsonrpc !== '2.0') return;
+      if (message.id != null && pending.has(message.id)) {
+        var handlers = pending.get(message.id); pending.delete(message.id);
+        if (message.error) handlers.reject(new Error(message.error.message||'Host error')); else handlers.resolve(message.result);
+      }
+      if (message.method === 'ui/notifications/tool-result') {
+        var snapshot = unpack(message.params);
+        if (snapshot && typeof snapshot === 'object') render(snapshot);
+      }
+    }, {passive:true});
+
+    document.getElementById('refresh').addEventListener('click', refresh);
+    document.getElementById('projects').addEventListener('change', function (event) { selectedRoot=event.target.value; refresh(); });
+
+    send('ui/initialize', {protocolVersion:'2026-01-26',appInfo:{name:'cleanroom-live-status',version:'1.0.0'},appCapabilities:{availableDisplayModes:['inline','fullscreen','pip']}})
+      .then(function () { initialized=true; window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*'); return refresh(); })
+      .then(function () { interval=setInterval(refresh,2000); })
+      .catch(function (error) { document.getElementById('connection').textContent='Initialization failed'; document.getElementById('content').textContent=error.message; });
+    window.addEventListener('beforeunload', function () { if (interval) clearInterval(interval); });
+  })();
+</script>
+</body>
+</html>

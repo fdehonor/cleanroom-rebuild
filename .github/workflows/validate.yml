@@ -1,0 +1,28 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile server
+        run: python -m py_compile plugin/server/cleanroom_mcp.py
+      - name: Run engine tests
+        run: python -m unittest discover -s tests -v
+      - name: Parse PowerShell installers
+        shell: pwsh
+        run: |
+          [void][ScriptBlock]::Create((Get-Content installer/Install-CleanroomRebuild.ps1 -Raw))
+          [void][ScriptBlock]::Create((Get-Content installer/Configure-IDEWorkspace.ps1 -Raw))
+      - name: Validate JSON manifests
+        shell: pwsh
+        run: |
+          Get-Content plugin/plugin.json -Raw | ConvertFrom-Json | Out-Null
+          Get-Content plugin/mcp.json -Raw | ConvertFrom-Json | Out-Null

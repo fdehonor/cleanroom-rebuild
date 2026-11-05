@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "cleanroom-engine": {
+      "type": "stdio",
+      "command": "py",
+      "args": [
+        "-3.12",
+        "${PLUGIN_ROOT}/server/cleanroom_mcp.py"
+      ],
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}
