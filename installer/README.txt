@@ -1,4 +1,4 @@
-CLEANROOM REBUILD 0.4.0 — PUBLIC WINDOWS INSTALLER
+CLEANROOM REBUILD 0.4.1 — PUBLIC WINDOWS INSTALLER
 
 This installer may be used free of charge under its MIT License. Components it
 downloads retain their own licenses. Read THIRD-PARTY-NOTICES.md first.
@@ -13,6 +13,7 @@ What it installs
 - A ready coding workspace with the official Codex extension and IDE tasks
 - A model-free live status app in Codex with two-second progress refresh
 - Codex, Claude Code, and Gemini CLI automatic task routing
+- A detailed shared LLM operating contract with provider-specific instructions
 
 How to install
 --------------

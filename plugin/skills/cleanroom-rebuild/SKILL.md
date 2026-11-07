@@ -7,6 +7,8 @@ description: Use for authorized clean-room reconstruction, interoperability anal
 
 Use this workflow only for software the user owns, is licensed to analyze, or is otherwise authorized to inspect. It is an engineering control, not legal clearance.
 
+After `cleanroom_initialize`, read `.cleanroom/CLEANROOM_WORKFLOW.md` completely. It is the detailed cross-provider operating contract copied into every project. Provider-specific `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` files supplement but do not replace it.
+
 ## Separation model
 
 Maintain two logical rooms:

@@ -11,6 +11,8 @@
 
 The orchestration skill selects analysis providers, records sanitized observations, maintains the feature inventory, generates the implementation plan, tracks executed validation evidence, checks hashed-token similarity, registers release artifacts, and evaluates the hard gate. The IDE configurator prepares editor extensions, compiler/build tools, tasks, and a shared workspace.
 
+`CLEANROOM_WORKFLOW.md` is the authoritative cross-provider instruction manual. The installer places it in the IDE workspace, and `cleanroom_initialize` copies the bundled, hashed version into `.cleanroom/CLEANROOM_WORKFLOW.md` for project-local use. Provider-specific files define roles and require the complete shared contract to be read before action.
+
 The coding-agent scheduler detects Codex, Claude Code, and Gemini CLI without a model call. In automatic mode it chooses one provider for short/low-risk work, two for normal work, and three for high-risk work when at least 20 minutes are available. Codex is the only writer. Independent reviewers run concurrently and cannot approve or override the deterministic release gate. Missing or unauthenticated optional providers produce a visible degraded plan instead of blocking Codex-only operation.
 
 The status application reads state directly from disk every two seconds. Its refresh path is `MCP App → cleanroom_dashboard → local JSON/JSONL`; it does not invoke Codex or another model.

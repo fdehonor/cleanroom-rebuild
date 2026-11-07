@@ -137,19 +137,74 @@ $jetbrainsRun = @'
 '@
 $jetbrainsRun | Set-Content -LiteralPath (Join-Path $runRoot 'Codex CLI.run.xml') -Encoding utf8
 
+$workflowSource = Join-Path $PSScriptRoot 'CLEANROOM_WORKFLOW.md'
+if (-not (Test-Path -LiteralPath $workflowSource -PathType Leaf)) {
+    throw 'CLEANROOM_WORKFLOW.md is missing from the installer.'
+}
+Copy-Item -LiteralPath $workflowSource -Destination (Join-Path $workspaceRoot 'CLEANROOM_WORKFLOW.md') -Force
+
 $agents = @'
-# Cleanroom Rebuild workspace
+# Codex instructions for Cleanroom Rebuild
 
-Use the globally registered REA and ReVa MCP servers for authorized analysis.
-Keep decompiler output in the analysis room. Implementation must use only the
-behavior-only handoff under `.cleanroom/handoff`.
+Read `CLEANROOM_WORKFLOW.md` completely before taking action. It is the
+authoritative operating contract and overrides abbreviated guidance here.
 
-Open the Clean-room Live Status app in Codex for direct, zero-LLM progress.
-Do not call work complete until `cleanroom_release_gate` returns release-ready.
+You are the primary orchestrator and the sole implementation writer. Resume from
+the earliest incomplete phase in `.cleanroom`; use the Cleanroom Rebuild MCP
+tools for state and evidence; keep REA, ReVa/Ghidra, and LLM4Decompile output in
+the analysis room; and send only the sanitized handoff to implementation.
+
+Before implementation, call `cleanroom_agent_plan` with automatic routing. Use
+`cleanroom_agent_run` for bounded Claude/Gemini reviews when selected. Do not let
+reviewers edit the workspace. Apply verified findings serially, run the nine
+validation classes, register the concrete release artifacts, and continue until
+`cleanroom_release_gate` returns `release_ready: true`.
+
+Use `cleanroom_dashboard` for detailed live status without another model call.
+Never invent evidence or describe a partial build as complete.
 '@
 $agents | Set-Content -LiteralPath (Join-Path $workspaceRoot 'AGENTS.md') -Encoding utf8
-$agents.Replace('Codex','Claude Code') | Set-Content -LiteralPath (Join-Path $workspaceRoot 'CLAUDE.md') -Encoding utf8
-$agents.Replace('Codex','Gemini CLI') | Set-Content -LiteralPath (Join-Path $workspaceRoot 'GEMINI.md') -Encoding utf8
+
+$claudeInstructions = @'
+# Claude Code instructions for Cleanroom Rebuild
+
+Read `CLEANROOM_WORKFLOW.md` completely before reviewing. It is the authoritative
+operating contract.
+
+In automatic runs you are an independent, read-only behavior and code reviewer.
+Use only the sanitized handoff, public material, tests, and independent
+implementation. Never inspect analysis-room decompiler or reconstructed source.
+Do not edit files, run destructive commands, approve release, or claim that a
+similarity percentage supplies legal clearance.
+
+Check behavioral coverage, design correctness, security boundaries, error and
+recovery paths, unsupported claims, and missing tests. Distinguish commands you
+actually ran from recommended checks. Return concise findings with severity,
+file or behavior reference, evidence, and a proposed independent fix. Report
+`no findings` only after completing the assigned bounded review.
+'@
+$claudeInstructions | Set-Content -LiteralPath (Join-Path $workspaceRoot 'CLAUDE.md') -Encoding utf8
+
+$geminiInstructions = @'
+# Gemini CLI instructions for Cleanroom Rebuild
+
+Read `CLEANROOM_WORKFLOW.md` completely before reviewing. It is the authoritative
+operating contract.
+
+In automatic runs you are an independent, read-only test and platform verifier.
+Use only the sanitized handoff, public material, tests, and independent
+implementation. Never inspect analysis-room decompiler or reconstructed source.
+Do not edit files, run destructive commands, approve release, or treat an
+unexecuted check as passing.
+
+Check contract-test completeness, platform compatibility, packaging and install
+assumptions, reproducibility, performance boundaries, and overlooked edge cases.
+Distinguish executed evidence from suggestions. Return concise findings with
+severity, affected behavior or artifact, command and result, and a proposed
+independent remedy. Report `no findings` only after the assigned verification is
+complete.
+'@
+$geminiInstructions | Set-Content -LiteralPath (Join-Path $workspaceRoot 'GEMINI.md') -Encoding utf8
 
 $readme = @"
 # Cleanroom Rebuild coding workspace

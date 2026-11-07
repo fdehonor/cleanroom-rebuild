@@ -11,6 +11,7 @@ Cleanroom Rebuild is a Windows-first Codex plugin and installer for authorized, 
 - VS Code/Cursor/Windsurf setup with the official Codex extension and a ready multi-repository workspace.
 - Optional Visual Studio Community, PyCharm Community, and IntelliJ IDEA Community setup.
 - Automatic provider routing: Codex writes; Claude Code and Gemini CLI perform bounded, parallel read-only reviews when risk and time justify them.
+- A detailed `CLEANROOM_WORKFLOW.md` operating contract is installed in the IDE workspace and copied into every initialized project, with provider-specific `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` instructions.
 
 ## Install
 

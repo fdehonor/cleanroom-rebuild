@@ -17,7 +17,7 @@ from agent_scheduler import choose_plan, detect_providers, run_plan
 
 
 SERVER_NAME = "cleanroom-engine"
-SERVER_VERSION = "0.4.0"
+SERVER_VERSION = "0.4.1"
 STATUS_RESOURCE_URI = "ui://cleanroom-rebuild/status-dashboard-v1.html"
 TOKEN_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*|0x[0-9A-Fa-f]+|\d+(?:\.\d+)?|"
@@ -402,11 +402,24 @@ def _clean_list(value: Any, name: str, maximum: int) -> list[str]:
     return result
 
 
+def _install_workflow_contract(state: Path) -> tuple[Path, str]:
+    workflow_source = SERVER_DIR.parent / "CLEANROOM_WORKFLOW.md"
+    if not workflow_source.is_file():
+        raise ValueError("bundled CLEANROOM_WORKFLOW.md is missing")
+    workflow_text = workflow_source.read_text(encoding="utf-8")
+    workflow_hash = hashlib.sha256(workflow_text.encode("utf-8")).hexdigest()
+    destination = state / "CLEANROOM_WORKFLOW.md"
+    if not destination.is_file() or destination.read_text(encoding="utf-8") != workflow_text:
+        destination.write_text(workflow_text, encoding="utf-8", newline="\n")
+    return destination, workflow_hash
+
+
 def _initialize(args: dict[str, Any]) -> dict[str, Any]:
     root = _root(args["project_root"], create=True)
     state = root / ".cleanroom"
-    for name in ("analysis", "evidence", "handoff", "implementation", "verification"):
+    for name in ("analysis", "evidence", "handoff", "implementation", "verification", "agents"):
         (state / name).mkdir(parents=True, exist_ok=True)
+    workflow_path, workflow_hash = _install_workflow_contract(state)
     policy = {
         "schema_version": 1,
         "project_name": args["project_name"].strip(),
@@ -414,6 +427,7 @@ def _initialize(args: dict[str, Any]) -> dict[str, Any]:
         "source_description": args["source_description"].strip(),
         "authorization_basis": args["authorization_basis"].strip(),
         "created_at": _now(),
+        "agent_workflow_sha256": workflow_hash,
         "rules": {
             "analysis_may_view_reconstructed_code": True,
             "handoff_may_contain_reconstructed_code": False,
@@ -423,7 +437,14 @@ def _initialize(args: dict[str, Any]) -> dict[str, Any]:
     }
     _atomic_json(state / "policy.json", policy)
     _remember_project(root, policy)
-    return {"status": "initialized", "project_root": str(root), "state_root": str(state), "policy": policy}
+    return {
+        "status": "initialized",
+        "project_root": str(root),
+        "state_root": str(state),
+        "agent_workflow": str(workflow_path),
+        "agent_workflow_sha256": workflow_hash,
+        "policy": policy,
+    }
 
 
 def _record(args: dict[str, Any]) -> dict[str, Any]:
@@ -817,6 +838,12 @@ def _status(args: dict[str, Any]) -> dict[str, Any]:
 
 def _agent_plan(args: dict[str, Any]) -> dict[str, Any]:
     _, state = _state_root(args["project_root"])
+    workflow_path, workflow_hash = _install_workflow_contract(state)
+    policy_path = state / "policy.json"
+    policy = _read_json(policy_path, {})
+    if policy.get("agent_workflow_sha256") != workflow_hash:
+        policy["agent_workflow_sha256"] = workflow_hash
+        _atomic_json(policy_path, policy)
     if not (state / "handoff" / "specification.json").is_file():
         raise ValueError("generate the behavior-only handoff before planning implementation agents")
     plan = choose_plan(
@@ -825,6 +852,8 @@ def _agent_plan(args: dict[str, Any]) -> dict[str, Any]:
         args.get("mode", "auto"),
         int(args.get("time_budget_minutes", 30)),
     )
+    plan["workflow_contract"] = str(workflow_path)
+    plan["workflow_sha256"] = workflow_hash
     _atomic_json(state / "agents" / "plan.json", plan)
     return plan
 

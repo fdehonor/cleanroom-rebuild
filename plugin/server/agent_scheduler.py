@@ -150,9 +150,13 @@ def run_plan(project_root: str, plan: dict[str, Any], sanitized_handoff: str, ma
     run_id = f"run-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     run_root = root / ".cleanroom" / "agents" / run_id
     run_root.mkdir(parents=True, exist_ok=False)
+    workflow_path = root / ".cleanroom" / "CLEANROOM_WORKFLOW.md"
+    if not workflow_path.is_file():
+        raise ValueError("project is missing .cleanroom/CLEANROOM_WORKFLOW.md; reinitialize it with the current engine")
     timeout_seconds = max(60, int(plan["time_budget_minutes"] * 60))
     common = (
-        "You are working in an authorized clean-room implementation. Do not seek or use original, "
+        "First read .cleanroom/CLEANROOM_WORKFLOW.md completely and follow it as the authoritative "
+        "operating contract. You are working in an authorized clean-room implementation. Do not seek or use original, "
         "decompiled, or reconstructed source. Work only from this behavior-only handoff:\n\n"
         + sanitized_handoff
         + "\n\nTask:\n" + plan["task"]

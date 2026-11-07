@@ -34,6 +34,21 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(gate["release_ready"])
         self.assertTrue(gate["blockers"])
 
+    def test_detailed_agent_contract_is_installed_in_every_project(self) -> None:
+        contract = self.root / ".cleanroom" / "CLEANROOM_WORKFLOW.md"
+        self.assertTrue(contract.is_file())
+        text = contract.read_text(encoding="utf-8")
+        for heading in (
+            "Non-negotiable clean-room boundary",
+            "Automatic end-to-end state machine",
+            "Provider responsibilities",
+            "Failure and recovery rules",
+            "Prohibited actions",
+        ):
+            self.assertIn(heading, text)
+        expected = MODULE._read_json(self.root / ".cleanroom" / "policy.json", {})["agent_workflow_sha256"]
+        self.assertEqual(MODULE.hashlib.sha256(text.encode("utf-8")).hexdigest(), expected)
+
     def test_dashboard_is_direct_and_model_free(self) -> None:
         snapshot = MODULE._dashboard({"project_root": str(self.root)})
         self.assertTrue(snapshot["configured"])
@@ -74,6 +89,12 @@ class EngineTests(unittest.TestCase):
         self.assertLessEqual(len(plan["selected"]), 2)
         status = MODULE._agent_status({"project_root": str(self.root)})
         self.assertTrue(status["no_llm_used"])
+
+    def test_installer_and_plugin_contracts_match(self) -> None:
+        repository = SERVER.parents[2]
+        installer = repository / "installer" / "CLEANROOM_WORKFLOW.md"
+        bundled = repository / "plugin" / "CLEANROOM_WORKFLOW.md"
+        self.assertEqual(installer.read_bytes(), bundled.read_bytes())
 
 
 if __name__ == "__main__":
