@@ -4,7 +4,7 @@ Cleanroom Rebuild is a Windows-first Codex plugin and installer for authorized, 
 
 ## What is included
 
-- An 18-tool local MCP server for clean-room project state, evidence, multi-agent scheduling, similarity review, validation, and release gating.
+- A 21-tool local MCP server for clean-room project state, evidence, asynchronous multi-agent scheduling, engine-executed validation, similarity review, and release gating.
 - A zero-LLM live status app that opens from Codex navigation or a conversation and polls local state every two seconds.
 - GPU-first LLM4Decompile inference with CUDA/eGPU, Intel XPU, DirectML, and CPU fallback.
 - A one-click installer for Ghidra/ReVa, REA, model runtime, and Codex registration.
@@ -12,6 +12,8 @@ Cleanroom Rebuild is a Windows-first Codex plugin and installer for authorized, 
 - Optional Visual Studio Community, PyCharm Community, and IntelliJ IDEA Community setup.
 - Automatic provider routing: Codex writes; Claude Code and Gemini CLI perform bounded, parallel read-only reviews when risk and time justify them.
 - A detailed `CLEANROOM_WORKFLOW.md` operating contract is installed in the IDE workspace and copied into every initialized project, with provider-specific `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` instructions.
+- Sanitized external implementation workspaces, live job events, cancellation/resume, structured reviewer findings, and bounded automatic repair cycles. Release gating requires an administrator-configured OS-enforced sandbox wrapper.
+- Pinned model-worker dependencies, generated SBOMs, repair/uninstall tools, redacted diagnostics, and optional Authenticode release signing.
 
 ## Install
 
@@ -26,6 +28,10 @@ The installer also installs the Claude Code and Gemini CLIs by default. Run `cla
 ## Architecture and automation
 
 See [the detailed process and control chart](docs/architecture.md) and [the automation contract](docs/automation-contract.md).
+
+Maintenance scripts are installed under `~/Tools/Cleanroom-Rebuild/maintenance`. Public release archives remain unsigned unless the publisher supplies a trusted code-signing certificate and runs `Sign-Release.ps1` before packaging.
+
+Directory separation alone is not described as an OS security boundary. Set `CLEANROOM_ENFORCED_SANDBOX_WRAPPER` to an audited executable wrapper that accepts `--workspace <path> -- <command...>` and exposes only that sanitized workspace. Before trusting it, the engine performs a live canary attestation that must permit a write inside the workspace and deny a read from a sibling path. High-risk runs require an attested wrapper by default, and the release gate rejects runs and validations without it.
 
 ## Important boundary
 

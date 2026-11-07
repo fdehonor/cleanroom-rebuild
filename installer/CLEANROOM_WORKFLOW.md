@@ -155,20 +155,29 @@ vectors, constraints, and uncertainty—never reconstructed implementation.
      Gemini when installed and authenticated.
 5. A degraded plan is allowed when an optional provider is unavailable. Record
    the degradation; never pretend the missing review occurred.
+6. Directory separation is not an OS security boundary. High-risk runs require
+   `CLEANROOM_ENFORCED_SANDBOX_WRAPPER`, pointing to an audited wrapper that
+   accepts `--workspace <path> -- <command...>` and exposes only that workspace.
+   The engine attests it with an outside-read canary and inside-write proof before
+   treating it as enforced. Release readiness is blocked when the passing run or
+   executed validations lack attested isolation.
 
 Output: implementation plan, provider roles, budgets, and acceptance tests.
 
 ### Phase F — implement independently
 
 1. Codex is the sole implementation writer in the automatic workflow.
-2. Work only in the implementation workspace and only from the sanitized
-   handoff, public material, and independent tests.
+2. Work only in the sanitized external implementation workspace created under
+   the user's local application-data directory. It intentionally excludes the
+   analysis and evidence trees and receives only the sanitized handoff, operating
+   contract, implementation plan, public material, tests, and independent code.
 3. Implement the smallest complete vertical slice, run its tests, and preserve a
    runnable state.
 4. Keep generated files, dependencies, build steps, migrations, configuration,
    and launch instructions reproducible.
 5. Do not allow two agents to edit the same files concurrently. Reviewers are
-   read-only. Apply reviewer findings serially through the writer.
+   read-only. Apply reviewer findings serially through the writer. Only the
+   isolated `implementation/` directory may synchronize back to project state.
 6. Favor existing public libraries only when their licenses and distribution
    obligations are compatible with the release.
 
@@ -176,13 +185,18 @@ Output: independently written product code and repeatable build instructions.
 
 ### Phase G — independent review
 
-1. Run `cleanroom_agent_run` for the bounded plan.
+1. Run `cleanroom_agent_run` for the bounded plan. It queues a background worker
+   and returns immediately; use `cleanroom_agent_status` and the dashboard for
+   live events, `cleanroom_agent_cancel` to stop the provider process tree, and
+   `cleanroom_agent_resume` to restart an interrupted request as a new run.
 2. Claude reviews behavior coverage, design correctness, security boundaries,
    error handling, and unsupported claims without editing files.
 3. Gemini verifies tests, platform compatibility, packaging assumptions,
    reproducibility, and missing edge cases without editing files.
-4. Reviewers must cite files, commands, and observed results. Findings are not
-   passing evidence until Codex applies fixes and the relevant tests execute.
+4. Reviewers must return the required structured JSON conclusion and cite files,
+   commands, and observed results. A zero process exit code alone is not approval.
+   Medium-or-higher findings trigger bounded Codex repair and another review.
+   Findings are not passing evidence until Codex applies fixes and tests execute.
 5. Run reviewers concurrently only after the writer finishes its current change.
 6. Stop unnecessary work early when the risk policy permits and required checks
    already agree. Never early-exit a mandatory high-risk review.
@@ -191,8 +205,10 @@ Output: persisted per-provider results under `.cleanroom/agents`.
 
 ### Phase H — verify and validate
 
-Run and record all nine validation classes with
-`cleanroom_record_validation`:
+Run all nine validation classes with `cleanroom_run_validation`. This executes a
+string-array command without shell interpolation in a sanitized workspace and
+stores hashed stdout/stderr evidence. `cleanroom_record_validation` is retained
+for manual audit notes, but manual records do not satisfy the deterministic gate:
 
 1. `build`: clean build from documented prerequisites.
 2. `unit`: internal component behavior.
@@ -260,6 +276,8 @@ Output: hashed, installable Beta-or-better release and deterministic gate result
 - Do not occupy the GPU with optional agent work that would delay required local
   analysis.
 - Set bounded turns and wall-clock budgets for every provider job.
+- Keep the MCP control plane responsive by running provider jobs only in the
+  detached worker; write status and append-only events for model-free polling.
 - Preserve partial evidence on timeout or failure and resume from state.
 - Use two providers when the third adds more startup cost than risk reduction;
   require all three only for high-risk milestones under the routing policy.

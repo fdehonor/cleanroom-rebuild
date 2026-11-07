@@ -13,7 +13,7 @@ The orchestration skill selects analysis providers, records sanitized observatio
 
 `CLEANROOM_WORKFLOW.md` is the authoritative cross-provider instruction manual. The installer places it in the IDE workspace, and `cleanroom_initialize` copies the bundled, hashed version into `.cleanroom/CLEANROOM_WORKFLOW.md` for project-local use. Provider-specific files define roles and require the complete shared contract to be read before action.
 
-The coding-agent scheduler detects Codex, Claude Code, and Gemini CLI without a model call. In automatic mode it chooses one provider for short/low-risk work, two for normal work, and three for high-risk work when at least 20 minutes are available. Codex is the only writer. Independent reviewers run concurrently and cannot approve or override the deterministic release gate. Missing or unauthenticated optional providers produce a visible degraded plan instead of blocking Codex-only operation.
+The coding-agent scheduler detects Codex, Claude Code, and Gemini CLI without a model call. In automatic mode it chooses one provider for short/low-risk work, two for normal work, and three for high-risk work when at least 20 minutes are available. Codex is the only writer. The worker runs asynchronously in a sanitized directory outside the analysis tree, emits live JSON events, supports cancellation/resume, requires structured reviewer conclusions, and performs bounded Codex repair/review cycles. Directory separation is not an OS boundary: high-risk execution and release readiness require a configured enforced sandbox wrapper. Independent reviewers cannot approve or override the deterministic release gate. Missing or unauthenticated optional providers produce a visible degraded plan instead of blocking lower-risk Codex-only operation.
 
 The status application reads state directly from disk every two seconds. Its refresh path is `MCP App → cleanroom_dashboard → local JSON/JSONL`; it does not invoke Codex or another model.
 
@@ -30,6 +30,8 @@ Codex and LLM4Decompile may assist analysis and implementation. Deterministic to
 - Missing feature coverage routes back to discovery, not directly to packaging.
 - A process interruption leaves append-only observations and validations on disk for resumption.
 - Provider timeouts and nonzero exits are stored under `.cleanroom/agents`; a failed reviewer is never recorded as agreement.
+- A worker crash leaves its request, status, logs, and events available for resume. Cancellation terminates the active provider process tree.
+- Only `implementation/` is synchronized back from the isolated workspace; analysis artifacts are never mounted into it.
 
 ## Completion definition
 

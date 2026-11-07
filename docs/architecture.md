@@ -45,12 +45,19 @@ flowchart TB
       ROUTER -->|Low risk or under 10 min| C1[Codex only]
       ROUTER -->|Normal work| C2[Codex writer plus one reviewer]
       ROUTER -->|High risk and 20+ min| C3[Codex writer plus Claude and Gemini reviewers]
-      C1 & C2 & C3 --> IDE[Prepared IDE workspace and provider instructions]
+      C1 & C2 & C3 --> QUEUE[Queue detached worker and live event stream]
+      QUEUE --> ISOLATE[Create sanitized external directory without analysis artifacts]
+      ISOLATE --> OSBOUND{OS-enforced sandbox wrapper active?}
+      OSBOUND -->|No, lower risk only| IDE
+      OSBOUND -->|No, high risk| STOPRUN[Block run and release readiness]
+      OSBOUND -->|Yes| IDE
       IDE --> TESTFIRST[Create black-box contract tests]
-      TESTFIRST --> BUILD[Implement independent code and assets]
+      TESTFIRST --> BUILD[Codex implements independent code and assets]
       BUILD --> ARTIFACT[Build runnable candidate]
-      ARTIFACT --> REVIEW[Parallel read-only independent reviews]
-      REVIEW --> ARTIFACT
+      ARTIFACT --> REVIEW[Parallel structured read-only reviews]
+      REVIEW -->|Medium or higher findings| REPAIR[Bounded Codex repair cycle]
+      REPAIR --> REVIEW
+      REVIEW -->|Approved| SYNC[Sync implementation directory only]
     end
 
     subgraph VERIFY[Verification and release plane]

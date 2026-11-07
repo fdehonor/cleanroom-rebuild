@@ -9,10 +9,12 @@ Cleanroom Rebuild's installer and original orchestration code are MIT licensed. 
 | Ghidra | 12.1.3 | Apache-2.0 plus included third-party notices | https://github.com/NationalSecurityAgency/ghidra |
 | Reverse Engineering Assistant (ReVa) | 7.3.1 | Apache-2.0 | https://github.com/cyberkaida/reverse-engineering-assistant |
 | REA | 6.8.0 | MIT | https://github.com/morluto/rea |
+| Claude Code | 2.1.318 | Anthropic commercial terms | https://docs.anthropic.com/en/docs/claude-code |
+| Gemini CLI | 0.67.0 | Apache-2.0 code; Google service terms for hosted models | https://github.com/google-gemini/gemini-cli |
 | Eclipse Temurin JDK | 21.0.13+9 | GPL-2.0 with Classpath Exception and included notices | https://adoptium.net/ |
 | Apache Ant | 1.10.18 | Apache-2.0 | https://ant.apache.org/ |
 | Python | 3.15 global; 3.12 GPU worker | PSF License | https://www.python.org/ |
-| PyTorch and TorchVision | package-manager versions shown in installer log | BSD-style upstream licenses | https://pytorch.org/ |
+| PyTorch and TorchVision | 2.4.1 / 0.19.1 in the DirectML worker | BSD-style upstream licenses | https://pytorch.org/ |
 | Transformers and Accelerate | Transformers 4.55.3 for GPU worker | Apache-2.0 | https://github.com/huggingface/transformers |
 | Torch-DirectML | 0.2.5 development build via PyPI | MIT | https://github.com/microsoft/DirectML |
 | Visual Studio Code | current winget release | Microsoft license terms | https://code.visualstudio.com/ |

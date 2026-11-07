@@ -28,6 +28,20 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
     }
 }
 
+function Ensure-NpmGlobalPackage([string]$Npm, [string]$Name, [string]$Version) {
+    $installedVersion = $null
+    try {
+        $payload = (& $Npm list --global --depth=0 --json $Name 2>$null | Out-String) | ConvertFrom-Json
+        $property = $payload.dependencies.PSObject.Properties[$Name]
+        if ($property) { $installedVersion = $property.Value.version }
+    } catch { $installedVersion = $null }
+    if ($installedVersion -eq $Version) {
+        Write-Host "Using installed npm package: $Name@$Version"
+        return
+    }
+    Invoke-Checked $Npm @('install', '--global', "$Name@$Version")
+}
+
 function Find-Program([string[]]$Candidates) {
     foreach ($candidate in $Candidates) {
         if ([System.IO.Path]::IsPathRooted($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
@@ -59,15 +73,23 @@ function Get-VerifiedDownload([string]$Url, [string]$Destination, [string]$Sha25
     }
 }
 
-function Ensure-Clone([string]$Git, [string]$Url, [string]$Destination) {
+function Ensure-Clone([string]$Git, [string]$Url, [string]$Commit, [string]$Destination) {
     if (Test-Path -LiteralPath (Join-Path $Destination '.git') -PathType Container) {
-        Write-Host "Already cloned: $Destination"
-        return
+        $origin = (& $Git -C $Destination remote get-url origin).Trim()
+        if ($LASTEXITCODE -ne 0 -or $origin.TrimEnd('/') -ne $Url.TrimEnd('/')) {
+            throw "Repository origin mismatch at $Destination"
+        }
+    } else {
+        if (Test-Path -LiteralPath $Destination) {
+            throw "Refusing to overwrite non-repository path: $Destination"
+        }
+        Invoke-Checked $Git @('clone', '--filter=blob:none', '--no-checkout', $Url, $Destination)
     }
-    if (Test-Path -LiteralPath $Destination) {
-        throw "Refusing to overwrite non-repository path: $Destination"
-    }
-    Invoke-Checked $Git @('clone', '--filter=blob:none', $Url, $Destination)
+    Invoke-Checked $Git @('-C', $Destination, 'fetch', '--depth', '1', 'origin', $Commit)
+    Invoke-Checked $Git @('-C', $Destination, 'checkout', '--detach', '--force', $Commit)
+    $actual = (& $Git -C $Destination rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $actual -ne $Commit) { throw "Pinned source checkout failed at $Destination" }
+    Write-Host "Verified pinned source: $Destination @ $Commit"
 }
 
 function Set-UserEnvironment([string]$Name, [string]$Value) {
@@ -111,6 +133,13 @@ try {
     $npm = Find-Program @('npm.cmd')
     $python = Find-Program @('C:\Python315\python.exe', 'python.exe')
     $codex = Find-Program @('codex.exe', 'codex.cmd')
+    if (-not $codex) {
+        $storeCodex = Get-Command 'codex.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($storeCodex -and $storeCodex.Source) {
+            & $storeCodex.Source --version *> $null
+            if ($LASTEXITCODE -eq 0) { $codex = $storeCodex.Source }
+        }
+    }
 
     if (-not $git -and $winget) {
         Invoke-Checked $winget @('install', '--id', 'Git.Git', '--exact', '--accept-package-agreements', '--accept-source-agreements', '--silent')
@@ -173,15 +202,16 @@ try {
     Invoke-Checked $python @('-m', 'pip', 'install', '--upgrade', '--user', 'pip', 'setuptools', 'wheel')
     Invoke-Checked $python @('-m', 'pip', 'install', '--upgrade', '--user', $revaWheel)
     Invoke-Checked $python @('-m', 'pip', 'install', '--upgrade', '--user', 'mcp==1.30.0')
-    Invoke-Checked $python @('-m', 'pip', 'install', '--upgrade', '--user', 'torch', 'transformers', 'accelerate', 'sentencepiece', 'protobuf', 'numpy', 'tqdm', 'loguru', 'text-generation')
-    Invoke-Checked $gpuPython @('-m', 'pip', 'install', '--upgrade', 'torch-directml', 'transformers==4.55.3', 'accelerate', 'sentencepiece', 'protobuf')
+    $gpuLock = Join-Path $installerRoot 'python-gpu-requirements.lock'
+    if (-not (Test-Path -LiteralPath $gpuLock -PathType Leaf)) { throw 'Pinned GPU requirements lock is missing.' }
+    Invoke-Checked $gpuPython @('-m', 'pip', 'install', '--upgrade', '--requirement', $gpuLock)
     $pythonScripts = & $python -c "import sysconfig; print(sysconfig.get_path('scripts', 'nt_user'))"
     Add-UserPath $pythonScripts
     $revaExe = Join-Path $pythonScripts 'mcp-reva.exe'
     if (-not (Test-Path -LiteralPath $revaExe)) { throw "ReVa launcher was not created at $revaExe" }
 
     Write-Step 'Installing REA and its Codex skill'
-    Invoke-Checked $npm @('install', '--global', 'rea-agents@6.8.0')
+    Ensure-NpmGlobalPackage $npm 'rea-agents' '6.8.0'
     $npmPrefix = (& $npm prefix --global).Trim()
     $reaCmd = Join-Path $npmPrefix 'rea.cmd'
     $reaModule = Join-Path $npmPrefix 'node_modules\rea-agents\scripts\rea.mjs'
@@ -189,7 +219,8 @@ try {
 
     Write-Step 'Installing automatic Codex, Claude, and Gemini coding-agent support'
     if ($AgentProviders -eq 'All') {
-        Invoke-Checked $npm @('install', '--global', '@anthropic-ai/claude-code', '@google/gemini-cli')
+        Ensure-NpmGlobalPackage $npm '@anthropic-ai/claude-code' '2.1.318'
+        Ensure-NpmGlobalPackage $npm '@google/gemini-cli' '0.67.0'
     }
     $claude = Find-Program @('claude.cmd', 'claude.exe', 'claude')
     $gemini = Find-Program @('gemini.cmd', 'gemini.exe', 'gemini')
@@ -198,9 +229,9 @@ try {
     }
 
     Write-Step 'Cloning the three source repositories'
-    Ensure-Clone $git 'https://github.com/albertan017/LLM4Decompile.git' (Join-Path $sourceRoot 'LLM4Decompile')
-    Ensure-Clone $git 'https://github.com/cyberkaida/reverse-engineering-assistant.git' (Join-Path $sourceRoot 'reverse-engineering-assistant')
-    Ensure-Clone $git 'https://github.com/morluto/rea.git' (Join-Path $sourceRoot 'rea')
+    Ensure-Clone $git 'https://github.com/albertan017/LLM4Decompile.git' '85b364bf093eb2ee4f3687cfe38a203fca89f23e' (Join-Path $sourceRoot 'LLM4Decompile')
+    Ensure-Clone $git 'https://github.com/cyberkaida/reverse-engineering-assistant.git' '4d2fc5b4c5f4ce00d95f0bd6bdf0c64b67e65fc2' (Join-Path $sourceRoot 'reverse-engineering-assistant')
+    Ensure-Clone $git 'https://github.com/morluto/rea.git' 'f3c21665d8b098933e1e57dbd605ad2aa3f0c1c4' (Join-Path $sourceRoot 'rea')
 
     Write-Step 'Creating the coding workspace and configuring IDEs'
     $ideSetup = Join-Path $installerRoot 'Configure-IDEWorkspace.ps1'
@@ -230,6 +261,7 @@ try {
     & $codex mcp remove rea 2>$null | Out-Null
     Invoke-Checked $codex @('mcp', 'add', 'ReVa', '--env', "GHIDRA_INSTALL_DIR=$ghidraHome", '--env', "JAVA_HOME=$jdkHome", '--', $revaExe)
     Invoke-Checked $codex @('mcp', 'add', 'rea', '--env', "GHIDRA_INSTALL_DIR=$ghidraHome", '--env', "JAVA_HOME=$jdkHome", '--', $node, $reaModule, 'mcp')
+    Invoke-Checked $reaCmd @('setup', '--all-detected', '--skill', '--yes', '--format', 'json')
 
     if ($DownloadModels) {
         Write-Step 'Downloading the optional local 1.3B model weights'
@@ -237,8 +269,8 @@ try {
     }
 
     Write-Step 'Verifying the complete installation'
-    Invoke-Checked $python @('-c', 'import torch,transformers,jpype; print(torch.__version__, transformers.__version__, jpype.__version__)')
-    Invoke-Checked $gpuPython @('-c', 'import torch,torch_directml; d=torch_directml.device(); x=torch.tensor([1.0]).to(d); assert (x+x).cpu().item()==2.0; print(torch_directml.device_name(0))')
+    Invoke-Checked $python @('-c', "import jpype,importlib.metadata as m; print(jpype.__version__, m.version('reverse-engineering-assistant'))")
+    Invoke-Checked $gpuPython @('-c', 'import torch,transformers,torch_directml; d=torch_directml.device(); x=torch.tensor([1.0]).to(d); assert (x+x).cpu().item()==2.0; print(torch.__version__, transformers.__version__, torch_directml.device_name(0))')
     Invoke-Checked $reaCmd @('doctor', '--client', 'codex', '--provider', 'ghidra', '--format', 'json')
     Invoke-Checked $codex @('--version')
     if ($claude) { Invoke-Checked $claude @('--version') }
@@ -247,11 +279,23 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $ghidraHome 'support\analyzeHeadless.bat'))) { throw 'Ghidra headless launcher is missing.' }
     if (-not (Test-Path -LiteralPath $revaExtensionHome)) { throw 'ReVa Ghidra extension is missing.' }
 
+    Write-Step 'Installing maintenance, diagnostics, and SBOM tools'
+    $maintenanceRoot = Join-Path $toolsRoot 'maintenance'
+    New-Item -ItemType Directory -Force -Path $maintenanceRoot | Out-Null
+    foreach ($name in @('Install-CleanroomRebuild.ps1','Repair-CleanroomRebuild.ps1','Update-CleanroomRebuild.ps1','Uninstall-CleanroomRebuild.ps1','Export-Diagnostics.ps1','Generate-SBOM.ps1','Sign-Release.ps1','python-gpu-requirements.lock','CLEANROOM_WORKFLOW.md')) {
+        $source = Join-Path $installerRoot $name
+        if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $maintenanceRoot -Force }
+    }
+    & (Join-Path $maintenanceRoot 'Generate-SBOM.ps1') -OutputPath (Join-Path $toolsRoot 'cleanroom-sbom.json') -Python $python -GpuPython $gpuPython -Npm $npm
+    if ($LASTEXITCODE -ne 0) { throw 'SBOM generation failed.' }
+
     Write-Host "`nREADY. Close and reopen Codex, then ask: 'Start a clean-room rebuild project and analyze my authorized binary with Ghidra.'" -ForegroundColor Green
     Write-Host "IDE workspace: $(Join-Path $toolsRoot 'workspace\Cleanroom-Rebuild.code-workspace')"
     if ($claude) { Write-Host "One-time Claude sign-in: claude" -ForegroundColor Yellow }
     if ($gemini) { Write-Host "One-time Gemini sign-in: gemini" -ForegroundColor Yellow }
     Write-Host "Install log: $logPath"
+    Write-Host "Maintenance tools: $maintenanceRoot"
+    Write-Host "SBOM: $(Join-Path $toolsRoot 'cleanroom-sbom.json')"
 }
 catch {
     Write-Error $_

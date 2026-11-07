@@ -1,4 +1,4 @@
-CLEANROOM REBUILD 0.4.1 — PUBLIC WINDOWS INSTALLER
+CLEANROOM REBUILD 0.5.0 — PUBLIC WINDOWS INSTALLER
 
 This installer may be used free of charge under its MIT License. Components it
 downloads retain their own licenses. Read THIRD-PARTY-NOTICES.md first.
@@ -14,6 +14,9 @@ What it installs
 - A model-free live status app in Codex with two-second progress refresh
 - Codex, Claude Code, and Gemini CLI automatic task routing
 - A detailed shared LLM operating contract with provider-specific instructions
+- Sanitized external implementation workspaces and asynchronous live job events
+- Cancellation, resume, structured reviews, and automatic repair cycles
+- SBOM, repair, uninstall, redacted diagnostics, and optional signing tools
 
 How to install
 --------------
@@ -74,6 +77,31 @@ Codex is the only implementation writer. Normal work uses Codex plus one availab
 reviewer. Short low-risk jobs use Codex alone. High-risk release milestones use
 Codex, Claude, and Gemini when installed and the time budget is at least 20 minutes.
 Reviewers run in parallel, time out cleanly, and cannot override the release gate.
+Implementation agents run outside the analysis project with only the sanitized
+handoff and independent implementation files. Use `cleanroom_agent_cancel` and
+`cleanroom_agent_resume` for interrupted work.
+
+Directory separation is not an OS security boundary. High-risk and release-ready
+runs require an audited executable sandbox wrapper configured through
+`CLEANROOM_ENFORCED_SANDBOX_WRAPPER`; it must accept
+`--workspace <path> -- <command...>` and expose only the sanitized workspace.
+The engine runs a canary attestation before accepting the wrapper: workspace
+writes must work and reads from a sibling path must be denied.
+
+Maintenance
+-----------
+Maintenance scripts and the pinned dependency lock are installed under
+`%USERPROFILE%\Tools\Cleanroom-Rebuild\maintenance`. Use Repair-CleanroomRebuild.ps1
+to repair the installation, Update-CleanroomRebuild.ps1 for checksum-verified
+updates from the expected GitHub repository, Export-Diagnostics.ps1 to create a
+credential-redacted support archive, and Uninstall-CleanroomRebuild.ps1 for confirmed removal. The
+generated component inventory is `cleanroom-sbom.json`.
+
+Release signing
+---------------
+The public source supports Authenticode signing through Sign-Release.ps1. A real
+trusted signature requires the publisher's code-signing certificate and private
+key; unsigned community builds must not claim to be signed.
 
 Public-use boundary
 -------------------

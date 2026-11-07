@@ -51,6 +51,9 @@ $marketplace = @{
 }
 $marketplace | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $catalogRoot 'marketplace.json') -Encoding utf8
 
+& (Join-Path $releaseRoot 'Generate-SBOM.ps1') -OutputPath (Join-Path $releaseRoot 'release-sbom.json')
+if ($LASTEXITCODE -ne 0) { throw 'Release SBOM generation failed.' }
+
 $archive = Join-Path $OutputDirectory 'Cleanroom-Rebuild-Installer.zip'
 Compress-Archive -LiteralPath $releaseRoot -DestinationPath $archive -CompressionLevel Optimal -Force
 $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash

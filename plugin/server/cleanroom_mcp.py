@@ -4,6 +4,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -13,11 +16,11 @@ from typing import Any, Iterable
 SERVER_DIR = Path(__file__).resolve().parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
-from agent_scheduler import choose_plan, detect_providers, run_plan
+from agent_scheduler import cancel_run, choose_plan, detect_providers, isolation_status, prepare_isolated_workspace, read_run_status, resume_run, start_plan, wrap_in_sandbox
 
 
 SERVER_NAME = "cleanroom-engine"
-SERVER_VERSION = "0.4.1"
+SERVER_VERSION = "0.5.0"
 STATUS_RESOURCE_URI = "ui://cleanroom-rebuild/status-dashboard-v1.html"
 TOKEN_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*|0x[0-9A-Fa-f]+|\d+(?:\.\d+)?|"
@@ -157,7 +160,7 @@ TOOLS = [
     },
     {
         "name": "cleanroom_record_validation",
-        "description": "Record evidence from an executed release validation and map compatibility coverage to observation IDs.",
+        "description": "Record manual validation evidence for audit history. Manual records do not satisfy the deterministic release gate.",
         "inputSchema": _schema(
             {
                 "project_root": {"type": "string"},
@@ -173,6 +176,23 @@ TOOLS = [
                 "notes": {"type": "string", "maxLength": 2000},
             },
             ["project_root", "kind", "name", "passed", "command", "evidence_reference"],
+        ),
+    },
+    {
+        "name": "cleanroom_run_validation",
+        "description": "Execute a release validation without shell interpolation in a sanitized workspace, hash its logs, and record gate-eligible evidence.",
+        "inputSchema": _schema(
+            {
+                "project_root": {"type": "string"},
+                "kind": {"type": "string", "enum": ["build", "unit", "integration", "compatibility", "regression", "smoke", "packaging", "security", "performance"]},
+                "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                "command": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 2000}, "minItems": 1, "maxItems": 100},
+                "observation_ids": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 64}, "maxItems": 1000},
+                "notes": {"type": "string", "maxLength": 2000},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 7200, "default": 900},
+                "require_enforced_isolation": {"type": "boolean", "default": True},
+            },
+            ["project_root", "kind", "name", "command"],
         ),
     },
     {
@@ -219,7 +239,7 @@ TOOLS = [
     },
     {
         "name": "cleanroom_agent_run",
-        "description": "Run the automatic Codex writer and optional parallel Claude/Gemini read-only reviewers from the sanitized handoff.",
+        "description": "Start an asynchronous isolated Codex writer with optional structured Claude/Gemini review and repair cycles.",
         "inputSchema": _schema(
             {
                 "project_root": {"type": "string"},
@@ -228,15 +248,29 @@ TOOLS = [
                 "mode": {"type": "string", "enum": ["auto", "single", "dual", "triple"], "default": "auto"},
                 "time_budget_minutes": {"type": "integer", "minimum": 2, "maximum": 480, "default": 30},
                 "max_turns": {"type": "integer", "minimum": 1, "maximum": 50, "default": 8},
+                "max_repair_cycles": {"type": "integer", "minimum": 0, "maximum": 5, "default": 2},
+                "max_parallel_reviewers": {"type": "integer", "minimum": 1, "maximum": 2, "default": 2},
+                "max_workspace_mb": {"type": "integer", "minimum": 128, "maximum": 65536, "default": 4096},
+                "require_enforced_isolation": {"type": "boolean"},
             },
             ["project_root", "task"],
         ),
     },
     {
         "name": "cleanroom_agent_status",
-        "description": "Read installed provider availability and prior agent-run results without calling a model.",
-        "inputSchema": _schema({"project_root": {"type": "string"}}, ["project_root"]),
+        "description": "Read provider readiness, live worker state, events, and prior agent-run results without calling a model.",
+        "inputSchema": _schema({"project_root": {"type": "string"}, "run_id": {"type": "string"}}, ["project_root"]),
         "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "cleanroom_agent_cancel",
+        "description": "Request cancellation of a running agent job and its provider process tree.",
+        "inputSchema": _schema({"project_root": {"type": "string"}, "run_id": {"type": "string"}}, ["project_root"]),
+    },
+    {
+        "name": "cleanroom_agent_resume",
+        "description": "Resume a failed, cancelled, or interrupted agent run as a new isolated run from persisted state.",
+        "inputSchema": _schema({"project_root": {"type": "string"}, "run_id": {"type": "string"}}, ["project_root"]),
     },
     {
         "name": "llm4decompile_status",
@@ -276,6 +310,8 @@ def _now() -> str:
 
 def _root(value: str, create: bool = False) -> Path:
     path = Path(value).expanduser().resolve()
+    if path == Path(path.anchor) or path == Path.home().resolve():
+        raise ValueError("project_root must be a dedicated project directory, not a filesystem or user-profile root")
     if create:
         path.mkdir(parents=True, exist_ok=True)
     if not path.exists() or not path.is_dir():
@@ -625,12 +661,18 @@ def _contained_path(root: Path, value: str) -> Path:
 
 
 def _source_files(path: Path) -> Iterable[Path]:
+    path_attributes = getattr(path.lstat(), "st_file_attributes", 0) if path.exists() else 0
+    if path.is_symlink() or path_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        raise ValueError(f"symbolic links and reparse points are forbidden in implementation source: {path}")
     if path.is_file() and path.suffix.lower() in SOURCE_EXTENSIONS:
         yield path
         return
     if not path.is_dir():
         return
     for file in path.rglob("*"):
+        attributes = getattr(file.lstat(), "st_file_attributes", 0)
+        if file.is_symlink() or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+            raise ValueError(f"symbolic links and reparse points are forbidden in implementation source: {file}")
         if not file.is_file() or file.suffix.lower() not in SOURCE_EXTENSIONS:
             continue
         if any(part in {".git", ".cleanroom", "node_modules", ".venv", "dist", "build"} for part in file.parts):
@@ -694,9 +736,71 @@ def _record_validation(args: dict[str, Any]) -> dict[str, Any]:
         "evidence_sha256": hashlib.sha256(evidence_reference.encode("utf-8")).hexdigest(),
         "observation_ids": sorted(set(observation_ids)),
         "notes": (args.get("notes") or "").strip(),
+        "engine_executed": bool(args.get("_engine_executed", False)),
+        "exit_code": args.get("_exit_code"),
+        "stdout_sha256": args.get("_stdout_sha256"),
+        "stderr_sha256": args.get("_stderr_sha256"),
+        "isolation_enforced": bool(args.get("_isolation_enforced", False)),
     }
     _append_jsonl(state / "verification" / "validations.jsonl", record)
     return {"status": "recorded", "validation_id": record["id"], "kind": record["kind"], "passed": record["passed"], "coverage_count": len(record["observation_ids"])}
+
+
+def _sanitized_process_environment() -> dict[str, str]:
+    allowed = {"PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "LANG"}
+    return {key: value for key, value in os.environ.items() if key.upper() in allowed}
+
+
+def _run_validation(args: dict[str, Any]) -> dict[str, Any]:
+    root, state = _state_root(args["project_root"])
+    command = args["command"]
+    if not isinstance(command, list) or not command or any(not isinstance(item, str) or not item for item in command):
+        raise ValueError("command must be a nonempty array of strings")
+    identity = hashlib.sha256((args["kind"] + "\0" + args["name"] + "\0" + _now()).encode("utf-8")).hexdigest()[:16]
+    workspace = prepare_isolated_workspace(root, f"validation-{identity}")
+    isolation = isolation_status()
+    if bool(args.get("require_enforced_isolation", True)) and not isolation["enforced"]:
+        raise RuntimeError(isolation["reason"])
+    executable = command[0]
+    if Path(executable).is_absolute():
+        resolved_executable = Path(executable).resolve()
+        workspace_prefix = str(workspace).casefold() + os.sep
+        if not str(resolved_executable).casefold().startswith(workspace_prefix):
+            system_executable = shutil.which(executable)
+            if system_executable is None or Path(system_executable).resolve() != resolved_executable:
+                raise ValueError("absolute validation executable must be inside the isolated workspace or resolve from PATH")
+    evidence_root = state / "verification" / "evidence"
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    stdout_path = evidence_root / f"{identity}.stdout.log"
+    stderr_path = evidence_root / f"{identity}.stderr.log"
+    started = _now()
+    try:
+        result = subprocess.run(wrap_in_sandbox(command, workspace), cwd=workspace / "implementation", env=_sanitized_process_environment(), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=int(args.get("timeout_seconds", 900)), shell=False)
+        stdout = result.stdout[-10_000_000:]
+        stderr = result.stderr[-10_000_000:]
+        exit_code = result.returncode
+        passed = exit_code == 0
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = (exc.stderr if isinstance(exc.stderr, str) else "") + "\nValidation timed out."
+        exit_code = None
+        passed = False
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text(stderr, encoding="utf-8")
+    record_args = {
+        **args,
+        "passed": passed,
+        "command": json.dumps(command, ensure_ascii=False),
+        "evidence_reference": str(stdout_path.relative_to(root)),
+        "_engine_executed": True,
+        "_exit_code": exit_code,
+        "_stdout_sha256": _hash_file(stdout_path),
+        "_stderr_sha256": _hash_file(stderr_path),
+        "_isolation_enforced": bool(isolation["enforced"]),
+        "notes": ((args.get("notes") or "") + f" Started {started}; isolated workspace {workspace}").strip(),
+    }
+    recorded = _record_validation(record_args)
+    return {**recorded, "engine_executed": True, "isolation": isolation, "exit_code": exit_code, "stdout": str(stdout_path), "stderr": str(stderr_path)}
 
 
 def _hash_file(path: Path) -> str:
@@ -711,6 +815,9 @@ def _artifact_record(root: Path, value: str) -> dict[str, Any]:
     path = _contained_path(root, value)
     if not path.exists():
         raise ValueError(f"release artifact does not exist: {path}")
+    path_attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    if path.is_symlink() or path_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        raise ValueError(f"release artifacts cannot be symbolic links or reparse points: {path}")
     if path.is_file():
         return {"path": str(path.relative_to(root)), "type": "file", "size": path.stat().st_size, "sha256": _hash_file(path)}
     if not path.is_dir():
@@ -718,6 +825,13 @@ def _artifact_record(root: Path, value: str) -> dict[str, Any]:
     members = []
     total_size = 0
     for file in sorted(item for item in path.rglob("*") if item.is_file()):
+        attributes = getattr(file.lstat(), "st_file_attributes", 0)
+        if file.is_symlink() or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+            raise ValueError(f"release artifact contains a symbolic link or reparse point: {file}")
+        try:
+            file.resolve().relative_to(path.resolve())
+        except ValueError as exc:
+            raise ValueError(f"release artifact member escapes its root: {file}") from exc
         relative = file.relative_to(path).as_posix()
         size = file.stat().st_size
         total_size += size
@@ -753,9 +867,10 @@ def _release_gate(args: dict[str, Any]) -> dict[str, Any]:
     similarity = _read_json(state / "verification" / "similarity-report.json", None)
     candidate = _read_json(state / "verification" / "release-candidate.json", None)
     inventory = _read_json(state / "analysis" / "feature-inventory.json", {"features": []})
+    agent_run = read_run_status(args["project_root"]).get("latest")
     features = inventory.get("features", [])
     required_kinds = {"build", "unit", "integration", "compatibility", "regression", "smoke", "packaging", "security", "performance"}
-    passed = [item for item in validations if item.get("passed") is True]
+    passed = [item for item in validations if item.get("passed") is True and item.get("engine_executed") is True and item.get("isolation_enforced") is True]
     failed = [item for item in validations if item.get("passed") is False]
     passed_kinds = {item.get("kind") for item in passed}
     required_observations = {item["id"] for item in observations if item.get("category") != "uncertainty"}
@@ -793,6 +908,10 @@ def _release_gate(args: dict[str, Any]) -> dict[str, Any]:
         blockers.append("Similarity/separation review is missing.")
     elif similarity.get("review_required"):
         blockers.append("Similarity/separation review has unresolved flags.")
+    if not agent_run or agent_run.get("status") != "passed":
+        blockers.append("No passing asynchronous implementation/review run is recorded.")
+    elif not agent_run.get("isolation", {}).get("enforced"):
+        blockers.append("The passing agent run used directory separation without an OS-enforced sandbox backend.")
     release_ready = not blockers
     gate = {
         "schema_version": 1,
@@ -864,11 +983,14 @@ def _agent_run(args: dict[str, Any]) -> dict[str, Any]:
     if not handoff_path.is_file():
         raise ValueError("generate the behavior-only handoff before running implementation agents")
     plan = _agent_plan(args)
-    result = run_plan(
+    result = start_plan(
         str(root),
         plan,
-        handoff_path.read_text(encoding="utf-8"),
         int(args.get("max_turns", 8)),
+        int(args.get("max_repair_cycles", 2)),
+        int(args.get("max_parallel_reviewers", 2)),
+        int(args.get("max_workspace_mb", 4096)),
+        bool(args.get("require_enforced_isolation", args.get("risk", "medium") == "high")),
     )
     _atomic_json(state / "agents" / "latest.json", result)
     return result
@@ -876,14 +998,23 @@ def _agent_run(args: dict[str, Any]) -> dict[str, Any]:
 
 def _agent_status(args: dict[str, Any]) -> dict[str, Any]:
     _, state = _state_root(args["project_root"])
-    runs = sorted((state / "agents").glob("run-*/result.json"), reverse=True) if (state / "agents").is_dir() else []
+    live = read_run_status(args["project_root"], args.get("run_id"))
     return {
         "providers": detect_providers(),
         "plan": _read_json(state / "agents" / "plan.json", None),
-        "latest": _read_json(state / "agents" / "latest.json", None),
-        "run_count": len(runs),
+        **live,
         "no_llm_used": True,
     }
+
+
+def _agent_cancel(args: dict[str, Any]) -> dict[str, Any]:
+    _state_root(args["project_root"])
+    return cancel_run(args["project_root"], args.get("run_id"))
+
+
+def _agent_resume(args: dict[str, Any]) -> dict[str, Any]:
+    _state_root(args["project_root"])
+    return resume_run(args["project_root"], args.get("run_id"))
 
 
 def _dashboard(args: dict[str, Any]) -> dict[str, Any]:
@@ -918,14 +1049,15 @@ def _dashboard(args: dict[str, Any]) -> dict[str, Any]:
     gate = _read_json(state / "verification" / "release-gate.json", None)
     fingerprints = _read_json(state / "analysis" / "reference_fingerprints.json", {"references": []}).get("references", [])
     agent_plan = _read_json(state / "agents" / "plan.json", None)
-    agent_latest = _read_json(state / "agents" / "latest.json", None)
+    agent_live = read_run_status(str(root))
     handoff_ready = (state / "handoff" / "specification.json").is_file()
     plan_ready = (state / "implementation" / "plan.json").is_file()
     implementation_files = list(_source_files(state / "implementation"))
     required_kinds = ["build", "unit", "integration", "compatibility", "regression", "smoke", "packaging", "security", "performance"]
     latest_by_kind: dict[str, dict[str, Any]] = {}
     for record in validations:
-        latest_by_kind[record.get("kind", "unknown")] = record
+        if record.get("engine_executed") is True and record.get("isolation_enforced") is True:
+            latest_by_kind[record.get("kind", "unknown")] = record
     validation_matrix = [
         {
             "kind": kind,
@@ -941,7 +1073,7 @@ def _dashboard(args: dict[str, Any]) -> dict[str, Any]:
     covered_observations = {
         observation_id
         for item in validations
-        if item.get("passed") is True and item.get("kind") in {"compatibility", "integration", "regression", "smoke"}
+        if item.get("passed") is True and item.get("engine_executed") is True and item.get("isolation_enforced") is True and item.get("kind") in {"compatibility", "integration", "regression", "smoke"}
         for observation_id in item.get("observation_ids", [])
     }
     verified_features = [item for item in inventory if item.get("status") == "verified"]
@@ -1039,7 +1171,9 @@ def _dashboard(args: dict[str, Any]) -> dict[str, Any]:
         "agents": {
             "providers": detect_providers(),
             "plan": agent_plan,
-            "latest": agent_latest,
+            "latest": agent_live.get("latest"),
+            "events": agent_live.get("events", []),
+            "run_count": agent_live.get("run_count", 0),
         },
         "runtime": _llm_status({}),
     }
@@ -1183,12 +1317,15 @@ HANDLERS = {
     "cleanroom_plan_implementation": _plan,
     "cleanroom_check_similarity": _similarity,
     "cleanroom_record_validation": _record_validation,
+    "cleanroom_run_validation": _run_validation,
     "cleanroom_register_release_candidate": _register_release,
     "cleanroom_release_gate": _release_gate,
     "cleanroom_status": _status,
     "cleanroom_agent_plan": _agent_plan,
     "cleanroom_agent_run": _agent_run,
     "cleanroom_agent_status": _agent_status,
+    "cleanroom_agent_cancel": _agent_cancel,
+    "cleanroom_agent_resume": _agent_resume,
     "llm4decompile_status": _llm_status,
     "llm4decompile_refine": _llm_refine,
     "llm4decompile_assembly": _llm_assembly,
