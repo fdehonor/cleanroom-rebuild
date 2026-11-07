@@ -47,9 +47,8 @@ flowchart TB
       ROUTER -->|High risk and 20+ min| C3[Codex writer plus Claude and Gemini reviewers]
       C1 & C2 & C3 --> QUEUE[Queue detached worker and live event stream]
       QUEUE --> ISOLATE[Create sanitized external directory without analysis artifacts]
-      ISOLATE --> OSBOUND{OS-enforced sandbox wrapper active?}
-      OSBOUND -->|No, lower risk only| IDE
-      OSBOUND -->|No, high risk| STOPRUN[Block run and release readiness]
+      ISOLATE --> OSBOUND{Attested disposable VM or audited wrapper active?}
+      OSBOUND -->|No| STOPRUN[Block every automatic execution and release readiness]
       OSBOUND -->|Yes| IDE
       IDE --> TESTFIRST[Create black-box contract tests]
       TESTFIRST --> BUILD[Codex implements independent code and assets]
@@ -61,7 +60,13 @@ flowchart TB
     end
 
     subgraph VERIFY[Verification and release plane]
-      ARTIFACT --> MATRIX{Nine validation classes}
+      SYNC --> SIM[Compare implementation to hashed reference fingerprints]
+      SIM --> FLAG{Similarity review flags?}
+      FLAG -- Yes --> HUMAN[Human separation review and independent rewrite]
+      HUMAN -.-> BUILD
+      FLAG -- No --> PACKAGE[Build and hash Beta-or-better release artifacts]
+      PACKAGE --> REGISTER[Register immutable candidate manifest]
+      REGISTER --> MATRIX{Nine validation classes bound to candidate digest}
       MATRIX --> V1[Build]
       MATRIX --> V2[Unit]
       MATRIX --> V3[Integration]
@@ -73,12 +78,7 @@ flowchart TB
       MATRIX --> V9[Performance]
       V1 & V2 & V3 & V4 & V5 & V6 & V7 & V8 & V9 --> ALLPASS{All executed checks pass?}
       ALLPASS -- No --> BUILD
-      ALLPASS -- Yes --> SIM[Compare implementation to hashed reference fingerprints]
-      SIM --> FLAG{Similarity review flags?}
-      FLAG -- Yes --> HUMAN[Human separation review and independent rewrite]
-      HUMAN -.-> BUILD
-      FLAG -- No --> PACKAGE[Hash Beta-or-better release artifacts]
-      PACKAGE --> GATE{Hard release gate}
+      ALLPASS -- Yes --> GATE{Hard release gate rehashes candidate}
       GATE -- Missing feature, evidence, coverage, or artifact --> BLOCK[Block release and list exact blockers]
       BLOCK -.-> DISCOVER
       BLOCK -.-> BUILD

@@ -126,6 +126,16 @@ try {
 
     New-Item -ItemType Directory -Force -Path $toolsRoot, $downloadRoot, $sourceRoot | Out-Null
 
+    Write-Step 'Checking the Hyper-V-isolated implementation sandbox'
+    $sandboxSetup = Join-Path $installerRoot 'Enable-WindowsSandbox.ps1'
+    $sandboxJson = (& $sandboxSetup | Out-String).Trim()
+    Write-Host $sandboxJson
+    $sandboxStatus = $sandboxJson | ConvertFrom-Json
+    if (-not $sandboxStatus.Ready) {
+        Write-Warning 'Strong isolation is not ready. Installation will continue, but implementation and release-producing runs will fail closed until the reported remediation is completed.'
+    }
+    Set-UserEnvironment 'CLEANROOM_SANDBOX_BACKEND' 'auto'
+
     Write-Step 'Checking Git, Node.js, Python, and Codex'
     $winget = Find-Program @('winget.exe')
     $git = Find-Program @('git.exe')
@@ -168,6 +178,7 @@ try {
         $gpuPython = Find-Program @("$env:LOCALAPPDATA\Programs\Python\Python312\python.exe", "$env:LOCALAPPDATA\Python\pythoncore-3.12-64\python.exe")
     }
     if (-not $gpuPython) { throw 'Python 3.12 GPU worker installation failed.' }
+    Set-UserEnvironment 'CLEANROOM_GPU_PYTHON' $gpuPython
 
     Write-Step 'Downloading verified Ghidra, Java, Ant, and ReVa releases'
     $ghidraZip = Join-Path $downloadRoot 'ghidra_12.1.3_PUBLIC_20260817.zip'
@@ -282,7 +293,7 @@ try {
     Write-Step 'Installing maintenance, diagnostics, and SBOM tools'
     $maintenanceRoot = Join-Path $toolsRoot 'maintenance'
     New-Item -ItemType Directory -Force -Path $maintenanceRoot | Out-Null
-    foreach ($name in @('Install-CleanroomRebuild.ps1','Repair-CleanroomRebuild.ps1','Update-CleanroomRebuild.ps1','Uninstall-CleanroomRebuild.ps1','Export-Diagnostics.ps1','Generate-SBOM.ps1','Sign-Release.ps1','python-gpu-requirements.lock','CLEANROOM_WORKFLOW.md')) {
+    foreach ($name in @('Install-CleanroomRebuild.ps1','Repair-CleanroomRebuild.ps1','Update-CleanroomRebuild.ps1','Uninstall-CleanroomRebuild.ps1','Export-Diagnostics.ps1','Generate-SBOM.ps1','Sign-Release.ps1','Enable-WindowsSandbox.ps1','Enable Secure Sandbox.cmd','Test-CleanroomIsolation.ps1','python-gpu-requirements.lock','CLEANROOM_WORKFLOW.md')) {
         $source = Join-Path $installerRoot $name
         if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination $maintenanceRoot -Force }
     }

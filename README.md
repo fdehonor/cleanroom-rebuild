@@ -12,7 +12,7 @@ Cleanroom Rebuild is a Windows-first Codex plugin and installer for authorized, 
 - Optional Visual Studio Community, PyCharm Community, and IntelliJ IDEA Community setup.
 - Automatic provider routing: Codex writes; Claude Code and Gemini CLI perform bounded, parallel read-only reviews when risk and time justify them.
 - A detailed `CLEANROOM_WORKFLOW.md` operating contract is installed in the IDE workspace and copied into every initialized project, with provider-specific `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` instructions.
-- Sanitized external implementation workspaces, live job events, cancellation/resume, structured reviewer findings, and bounded automatic repair cycles. Release gating requires an administrator-configured OS-enforced sandbox wrapper.
+- Sanitized external implementation workspaces, live job events, cancellation/resume, structured reviewer findings, and bounded automatic repair cycles. On supported Windows editions, implementation commands run in disposable Hyper-V-isolated Windows Sandbox VMs with per-command attestations.
 - Pinned model-worker dependencies, generated SBOMs, repair/uninstall tools, redacted diagnostics, and optional Authenticode release signing.
 
 ## Install
@@ -31,7 +31,9 @@ See [the detailed process and control chart](docs/architecture.md) and [the auto
 
 Maintenance scripts are installed under `~/Tools/Cleanroom-Rebuild/maintenance`. Public release archives remain unsigned unless the publisher supplies a trusted code-signing certificate and runs `Sign-Release.ps1` before packaging.
 
-Directory separation alone is not described as an OS security boundary. Set `CLEANROOM_ENFORCED_SANDBOX_WRAPPER` to an audited executable wrapper that accepts `--workspace <path> -- <command...>` and exposes only that sanitized workspace. Before trusting it, the engine performs a live canary attestation that must permit a write inside the workspace and deny a read from a sibling path. High-risk runs require an attested wrapper by default, and the release gate rejects runs and validations without it.
+Directory separation alone is not described as an OS security boundary. The default `CLEANROOM_SANDBOX_BACKEND=auto` selects Windows Sandbox on supported Windows 10/11 Pro, Enterprise, or Education systems when the optional feature and hypervisor are ready. Every automatic execution requires an enforced backend. Each command gets a fresh disposable VM and a separate low-privilege guest principal. Reviewer workspaces are read-only. Only the selected provider's minimum authentication seed is supplied; validation commands receive no provider credentials and no network. Clipboard, vGPU, audio/video input, and printers are disabled. Provider jobs retain API networking. Every VM command emits a hashed runtime attestation, and release validations are bound to an immutable candidate manifest.
+
+Run `Enable Secure Sandbox.cmd` from the installed maintenance folder to enable the optional Windows feature with elevation, then restart if requested. Windows Home cannot host Windows Sandbox; it fails closed for release work. Such systems must upgrade Windows or use `CLEANROOM_ENFORCED_SANDBOX_WRAPPER` with an independently audited wrapper accepting `--workspace <path> -- <command...>`. The legacy wrapper path is still live-canary attested.
 
 ## Important boundary
 

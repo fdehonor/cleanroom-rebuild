@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -20,7 +21,7 @@ from agent_scheduler import cancel_run, choose_plan, detect_providers, isolation
 
 
 SERVER_NAME = "cleanroom-engine"
-SERVER_VERSION = "0.5.0"
+SERVER_VERSION = "0.6.0"
 STATUS_RESOURCE_URI = "ui://cleanroom-rebuild/status-dashboard-v1.html"
 TOKEN_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*|0x[0-9A-Fa-f]+|\d+(?:\.\d+)?|"
@@ -32,6 +33,8 @@ SOURCE_EXTENSIONS = {
     ".kts", ".php", ".scala", ".m", ".mm", ".asm", ".s",
 }
 MODEL_CACHE: dict[str, tuple[Any, Any, str, Any]] = {}
+ENGINE_RECEIPT_TOKEN = object()
+ALLOWED_VALIDATION_EXECUTABLES = {"python", "python.exe", "pytest", "pytest.exe", "node", "node.exe", "npm", "npm.cmd", "cmake", "cmake.exe", "ctest", "ctest.exe", "cargo", "cargo.exe", "dotnet", "dotnet.exe", "java", "java.exe", "git", "git.exe"}
 
 
 def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -190,7 +193,6 @@ TOOLS = [
                 "observation_ids": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 64}, "maxItems": 1000},
                 "notes": {"type": "string", "maxLength": 2000},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 7200, "default": 900},
-                "require_enforced_isolation": {"type": "boolean", "default": True},
             },
             ["project_root", "kind", "name", "command"],
         ),
@@ -251,7 +253,6 @@ TOOLS = [
                 "max_repair_cycles": {"type": "integer", "minimum": 0, "maximum": 5, "default": 2},
                 "max_parallel_reviewers": {"type": "integer", "minimum": 1, "maximum": 2, "default": 2},
                 "max_workspace_mb": {"type": "integer", "minimum": 128, "maximum": 65536, "default": 4096},
-                "require_enforced_isolation": {"type": "boolean"},
             },
             ["project_root", "task"],
         ),
@@ -322,12 +323,16 @@ def _root(value: str, create: bool = False) -> Path:
 def _state_root(project_root: str, require_initialized: bool = True) -> tuple[Path, Path]:
     root = _root(project_root)
     state = root / ".cleanroom"
+    if state.is_symlink() or (state.exists() and getattr(state.lstat(), "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+        raise ValueError("project .cleanroom state cannot be a symbolic link or reparse point")
     if require_initialized and not (state / "policy.json").is_file():
         raise ValueError("clean-room project is not initialized")
     return root, state
 
 
 def _atomic_json(path: Path, value: Any) -> None:
+    if isinstance(value, dict):
+        value = _seal_record(value)
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
     try:
@@ -340,11 +345,44 @@ def _atomic_json(path: Path, value: Any) -> None:
             os.unlink(temporary)
 
 
-def _read_json(path: Path, default: Any) -> Any:
+def _read_json(path: Path, default: Any, require_integrity: bool = False) -> Any:
     if not path.is_file():
         return default
     with path.open("r", encoding="utf-8") as stream:
-        return json.load(stream)
+        value = json.load(stream)
+    if require_integrity and (not isinstance(value, dict) or not _record_integrity_valid(value)):
+        raise ValueError(f"integrity verification failed: {path}")
+    return value
+
+
+def _integrity_key() -> bytes:
+    path = _registry_path().with_name("integrity.key")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(os.urandom(32))
+    except FileExistsError:
+        pass
+    data = path.read_bytes()
+    if len(data) != 32:
+        raise RuntimeError("clean-room integrity key is invalid")
+    return data
+
+
+def _seal_record(value: dict[str, Any]) -> dict[str, Any]:
+    record = {key: item for key, item in value.items() if key != "integrity_hmac_sha256"}
+    payload = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    record["integrity_hmac_sha256"] = hmac.new(_integrity_key(), payload, hashlib.sha256).hexdigest()
+    return record
+
+
+def _record_integrity_valid(value: dict[str, Any]) -> bool:
+    supplied = value.get("integrity_hmac_sha256")
+    if not isinstance(supplied, str):
+        return False
+    expected = _seal_record(value)["integrity_hmac_sha256"]
+    return hmac.compare_digest(supplied, expected)
 
 
 def _registry_path() -> Path:
@@ -382,10 +420,10 @@ def _recent_projects() -> list[dict[str, Any]]:
 def _append_jsonl(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+        stream.write(json.dumps(_seal_record(value), ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+def _read_jsonl(path: Path, require_integrity: bool = False) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     values = []
@@ -393,7 +431,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         for number, line in enumerate(stream, 1):
             if line.strip():
                 try:
-                    values.append(json.loads(line))
+                    value = json.loads(line)
+                    if require_integrity and (not isinstance(value, dict) or not _record_integrity_valid(value)):
+                        raise ValueError(f"integrity verification failed: {path}")
+                    values.append(value)
                 except json.JSONDecodeError as exc:
                     raise ValueError(f"invalid observation line {number}: {exc}") from exc
     return values
@@ -715,7 +756,7 @@ def _similarity(args: dict[str, Any]) -> dict[str, Any]:
     return {"status": "checked", "report": str(path), **{key: report[key] for key in ("files_checked", "review_required", "threshold", "legal_clearance")}}
 
 
-def _record_validation(args: dict[str, Any]) -> dict[str, Any]:
+def _record_validation(args: dict[str, Any], receipt: dict[str, Any] | None = None, token: object | None = None) -> dict[str, Any]:
     _, state = _state_root(args["project_root"])
     known_ids = {item["id"] for item in _read_jsonl(state / "analysis" / "observations.jsonl")}
     observation_ids = args.get("observation_ids") or []
@@ -725,6 +766,7 @@ def _record_validation(args: dict[str, Any]) -> dict[str, Any]:
     if unknown:
         raise ValueError(f"unknown observation IDs: {', '.join(unknown[:20])}")
     evidence_reference = args["evidence_reference"].strip()
+    trusted = receipt if token is ENGINE_RECEIPT_TOKEN and isinstance(receipt, dict) else {}
     record = {
         "id": hashlib.sha256((args["kind"] + "\0" + args["name"] + "\0" + evidence_reference + "\0" + _now()).encode("utf-8")).hexdigest()[:20],
         "recorded_at": _now(),
@@ -736,11 +778,14 @@ def _record_validation(args: dict[str, Any]) -> dict[str, Any]:
         "evidence_sha256": hashlib.sha256(evidence_reference.encode("utf-8")).hexdigest(),
         "observation_ids": sorted(set(observation_ids)),
         "notes": (args.get("notes") or "").strip(),
-        "engine_executed": bool(args.get("_engine_executed", False)),
-        "exit_code": args.get("_exit_code"),
-        "stdout_sha256": args.get("_stdout_sha256"),
-        "stderr_sha256": args.get("_stderr_sha256"),
-        "isolation_enforced": bool(args.get("_isolation_enforced", False)),
+        "engine_executed": bool(trusted.get("engine_executed", False)),
+        "exit_code": trusted.get("exit_code"),
+        "stdout_sha256": trusted.get("stdout_sha256"),
+        "stderr_sha256": trusted.get("stderr_sha256"),
+        "isolation_enforced": bool(trusted.get("isolation_enforced", False)),
+        "isolation_backend": trusted.get("isolation_backend"),
+        "isolation_attestation_sha256": trusted.get("isolation_attestation_sha256"),
+        "release_candidate_sha256": trusted.get("release_candidate_sha256"),
     }
     _append_jsonl(state / "verification" / "validations.jsonl", record)
     return {"status": "recorded", "validation_id": record["id"], "kind": record["kind"], "passed": record["passed"], "coverage_count": len(record["observation_ids"])}
@@ -759,23 +804,27 @@ def _run_validation(args: dict[str, Any]) -> dict[str, Any]:
     identity = hashlib.sha256((args["kind"] + "\0" + args["name"] + "\0" + _now()).encode("utf-8")).hexdigest()[:16]
     workspace = prepare_isolated_workspace(root, f"validation-{identity}")
     isolation = isolation_status()
-    if bool(args.get("require_enforced_isolation", True)) and not isolation["enforced"]:
+    if not isolation["enforced"]:
         raise RuntimeError(isolation["reason"])
+    candidate = _read_json(state / "verification" / "release-candidate.json", None)
+    if not candidate:
+        raise RuntimeError("register the immutable release candidate before running gate-eligible validations")
+    candidate_digest = _current_candidate_digest(root, candidate)
     executable = command[0]
-    if Path(executable).is_absolute():
-        resolved_executable = Path(executable).resolve()
-        workspace_prefix = str(workspace).casefold() + os.sep
-        if not str(resolved_executable).casefold().startswith(workspace_prefix):
-            system_executable = shutil.which(executable)
-            if system_executable is None or Path(system_executable).resolve() != resolved_executable:
-                raise ValueError("absolute validation executable must be inside the isolated workspace or resolve from PATH")
+    resolved_name = shutil.which(executable)
+    resolved_executable = Path(executable).resolve() if Path(executable).is_absolute() else Path(resolved_name).resolve() if resolved_name else None
+    inside_workspace = resolved_executable is not None and str(resolved_executable).casefold().startswith(str(workspace).casefold() + os.sep)
+    if not inside_workspace and (resolved_executable is None or resolved_executable.name.casefold() not in ALLOWED_VALIDATION_EXECUTABLES):
+        raise ValueError("validation executable must be inside the isolated workspace or on the fixed audited tool allowlist")
     evidence_root = state / "verification" / "evidence"
     evidence_root.mkdir(parents=True, exist_ok=True)
     stdout_path = evidence_root / f"{identity}.stdout.log"
     stderr_path = evidence_root / f"{identity}.stderr.log"
+    attestation_path = evidence_root / f"{identity}.sandbox-attestation.json"
     started = _now()
     try:
-        result = subprocess.run(wrap_in_sandbox(command, workspace), cwd=workspace / "implementation", env=_sanitized_process_environment(), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=int(args.get("timeout_seconds", 900)), shell=False)
+        timeout_seconds = int(args.get("timeout_seconds", 900))
+        result = subprocess.run(wrap_in_sandbox(command, workspace, attestation_path, timeout_seconds, workspace / "implementation", credential_provider=None, read_only_workspace=False, networking_enabled=False), cwd=workspace / "implementation", env=_sanitized_process_environment(), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_seconds + 60, shell=False)
         stdout = result.stdout[-10_000_000:]
         stderr = result.stderr[-10_000_000:]
         exit_code = result.returncode
@@ -787,20 +836,30 @@ def _run_validation(args: dict[str, Any]) -> dict[str, Any]:
         passed = False
     stdout_path.write_text(stdout, encoding="utf-8")
     stderr_path.write_text(stderr, encoding="utf-8")
+    attestation = None
+    if attestation_path.is_file():
+        try:
+            attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+        except Exception:
+            attestation = None
+    if isolation.get("runtime_attestation_required") and (not attestation or not attestation.get("enforced")):
+        passed = False
+        stderr += "\nRequired Windows Sandbox runtime attestation is missing or invalid."
+        stderr_path.write_text(stderr, encoding="utf-8")
+    if attestation and (attestation.get("backend") != isolation.get("backend") or attestation.get("workspace") != str(workspace) or attestation.get("exit_code") != exit_code or attestation.get("networking_enabled") is not False or attestation.get("credential_seed_files")):
+        passed = False
+        stderr += "\nRuntime attestation is not bound to the expected command policy."
+        stderr_path.write_text(stderr, encoding="utf-8")
     record_args = {
         **args,
         "passed": passed,
         "command": json.dumps(command, ensure_ascii=False),
         "evidence_reference": str(stdout_path.relative_to(root)),
-        "_engine_executed": True,
-        "_exit_code": exit_code,
-        "_stdout_sha256": _hash_file(stdout_path),
-        "_stderr_sha256": _hash_file(stderr_path),
-        "_isolation_enforced": bool(isolation["enforced"]),
         "notes": ((args.get("notes") or "") + f" Started {started}; isolated workspace {workspace}").strip(),
     }
-    recorded = _record_validation(record_args)
-    return {**recorded, "engine_executed": True, "isolation": isolation, "exit_code": exit_code, "stdout": str(stdout_path), "stderr": str(stderr_path)}
+    receipt = {"engine_executed": True, "exit_code": exit_code, "stdout_sha256": _hash_file(stdout_path), "stderr_sha256": _hash_file(stderr_path), "isolation_enforced": bool(isolation["enforced"]), "isolation_backend": isolation.get("backend"), "isolation_attestation_sha256": _hash_file(attestation_path) if attestation_path.is_file() else None, "release_candidate_sha256": candidate_digest}
+    recorded = _record_validation(record_args, receipt, ENGINE_RECEIPT_TOKEN)
+    return {**recorded, "engine_executed": True, "isolation": isolation, "isolation_attestation": attestation, "exit_code": exit_code, "stdout": str(stdout_path), "stderr": str(stderr_path)}
 
 
 def _hash_file(path: Path) -> str:
@@ -840,6 +899,19 @@ def _artifact_record(root: Path, value: str) -> dict[str, Any]:
     return {"path": str(path.relative_to(root)), "type": "directory", "size": total_size, "file_count": len(members), "sha256": hashlib.sha256(manifest_bytes).hexdigest()}
 
 
+def _artifact_manifest_digest(artifacts: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(json.dumps(artifacts, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _current_candidate_digest(root: Path, candidate: dict[str, Any]) -> str:
+    recorded = candidate.get("artifacts") or []
+    current = [_artifact_record(root, item["path"]) for item in recorded]
+    digest = _artifact_manifest_digest(current)
+    if current != recorded or digest != candidate.get("artifact_manifest_sha256"):
+        raise RuntimeError("release candidate bytes changed after registration; register again and rerun every validation")
+    return digest
+
+
 def _register_release(args: dict[str, Any]) -> dict[str, Any]:
     root, state = _state_root(args["project_root"])
     artifact_paths = args["artifact_paths"]
@@ -853,6 +925,7 @@ def _register_release(args: dict[str, Any]) -> dict[str, Any]:
         "maturity": args["maturity"],
         "launch_instructions": args["launch_instructions"].strip(),
         "artifacts": artifacts,
+        "artifact_manifest_sha256": _artifact_manifest_digest(artifacts),
         "legal_clearance": False,
     }
     path = state / "verification" / "release-candidate.json"
@@ -861,26 +934,56 @@ def _register_release(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _release_gate(args: dict[str, Any]) -> dict[str, Any]:
-    _, state = _state_root(args["project_root"])
-    observations = _read_jsonl(state / "analysis" / "observations.jsonl")
-    validations = _read_jsonl(state / "verification" / "validations.jsonl")
-    similarity = _read_json(state / "verification" / "similarity-report.json", None)
-    candidate = _read_json(state / "verification" / "release-candidate.json", None)
-    inventory = _read_json(state / "analysis" / "feature-inventory.json", {"features": []})
-    agent_run = read_run_status(args["project_root"]).get("latest")
+    root, state = _state_root(args["project_root"])
+    integrity_errors: list[str] = []
+    try:
+        observations = _read_jsonl(state / "analysis" / "observations.jsonl", require_integrity=True)
+    except ValueError as exc:
+        observations = []
+        integrity_errors.append(str(exc))
+    try:
+        validations = _read_jsonl(state / "verification" / "validations.jsonl", require_integrity=True)
+    except ValueError as exc:
+        validations = []
+        integrity_errors.append(str(exc))
+    def verified_json(path: Path, default: Any) -> Any:
+        try:
+            return _read_json(path, default, require_integrity=path.is_file())
+        except ValueError as exc:
+            integrity_errors.append(str(exc))
+            return default
+    similarity = verified_json(state / "verification" / "similarity-report.json", None)
+    candidate = verified_json(state / "verification" / "release-candidate.json", None)
+    inventory = verified_json(state / "analysis" / "feature-inventory.json", {"features": []})
+    handoff = verified_json(state / "handoff" / "specification.json", None)
+    implementation_plan = verified_json(state / "implementation" / "plan.json", None)
+    try:
+        agent_run = read_run_status(args["project_root"]).get("latest")
+    except ValueError as exc:
+        agent_run = None
+        integrity_errors.append(str(exc))
     features = inventory.get("features", [])
     required_kinds = {"build", "unit", "integration", "compatibility", "regression", "smoke", "packaging", "security", "performance"}
-    passed = [item for item in validations if item.get("passed") is True and item.get("engine_executed") is True and item.get("isolation_enforced") is True]
+    candidate_digest = None
+    candidate_integrity_error = None
+    if candidate:
+        try:
+            candidate_digest = _current_candidate_digest(root, candidate)
+        except Exception as exc:
+            candidate_integrity_error = str(exc)
+    passed = [item for item in validations if item.get("passed") is True and item.get("engine_executed") is True and item.get("isolation_enforced") is True and item.get("release_candidate_sha256") == candidate_digest and (item.get("isolation_backend") != "windows-sandbox-hyper-v" or item.get("isolation_attestation_sha256"))]
     failed = [item for item in validations if item.get("passed") is False]
     passed_kinds = {item.get("kind") for item in passed}
     required_observations = {item["id"] for item in observations if item.get("category") != "uncertainty"}
     covered = {observation_id for item in passed if item.get("kind") in {"compatibility", "integration", "regression", "smoke"} for observation_id in item.get("observation_ids", [])}
     blockers = []
+    if integrity_errors:
+        blockers.append(f"{len(integrity_errors)} authoritative state file(s) failed integrity verification.")
     if not observations:
         blockers.append("No behavioral observations were recorded.")
-    if not (state / "handoff" / "specification.json").is_file():
+    if handoff is None:
         blockers.append("Behavior-only handoff is missing.")
-    if not (state / "implementation" / "plan.json").is_file():
+    if implementation_plan is None:
         blockers.append("Implementation plan is missing.")
     missing_kinds = sorted(required_kinds - passed_kinds)
     if missing_kinds:
@@ -892,6 +995,8 @@ def _release_gate(args: dict[str, Any]) -> dict[str, Any]:
         blockers.append(f"{len(uncovered)} behavioral observation(s) lack passing compatibility coverage.")
     if candidate is None or not candidate.get("artifacts"):
         blockers.append("A hashed release candidate is not registered.")
+    elif candidate_integrity_error:
+        blockers.append(candidate_integrity_error)
     elif candidate.get("maturity") not in {"beta", "stable"}:
         blockers.append("Release candidate maturity is below Beta.")
     if not features:
@@ -912,6 +1017,8 @@ def _release_gate(args: dict[str, Any]) -> dict[str, Any]:
         blockers.append("No passing asynchronous implementation/review run is recorded.")
     elif not agent_run.get("isolation", {}).get("enforced"):
         blockers.append("The passing agent run used directory separation without an OS-enforced sandbox backend.")
+    elif agent_run.get("isolation", {}).get("backend") == "windows-sandbox-hyper-v" and any(not job.get("isolation_attestation_sha256") for job in agent_run.get("jobs", [])):
+        blockers.append("One or more Windows Sandbox agent jobs lack a runtime attestation.")
     release_ready = not blockers
     gate = {
         "schema_version": 1,
@@ -1350,6 +1457,31 @@ def _tool_result(value: Any, is_error: bool = False) -> dict[str, Any]:
     return result
 
 
+def _validate_tool_arguments(name: str, arguments: Any) -> dict[str, Any]:
+    if not isinstance(arguments, dict):
+        raise ValueError("tool arguments must be an object")
+    tool = next((item for item in TOOLS if item["name"] == name), None)
+    if tool is None:
+        raise ValueError(f"unknown tool: {name}")
+    schema = tool["inputSchema"]
+    properties = schema.get("properties", {})
+    unknown = sorted(set(arguments) - set(properties))
+    if unknown:
+        raise ValueError("unknown tool argument(s): " + ", ".join(unknown))
+    missing = [key for key in schema.get("required", []) if key not in arguments]
+    if missing:
+        raise ValueError("missing required tool argument(s): " + ", ".join(missing))
+    type_map = {"string": str, "boolean": bool, "array": list, "object": dict, "integer": int, "number": (int, float)}
+    for key, value in arguments.items():
+        expected_name = properties[key].get("type")
+        expected = type_map.get(expected_name)
+        if expected is not None and (not isinstance(value, expected) or expected_name == "integer" and isinstance(value, bool)):
+            raise ValueError(f"tool argument {key} must be {expected_name}")
+        if "enum" in properties[key] and value not in properties[key]["enum"]:
+            raise ValueError(f"tool argument {key} has an unsupported value")
+    return arguments
+
+
 def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
     request_id = message.get("id")
     method = message.get("method")
@@ -1392,7 +1524,7 @@ def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
         if handler is None:
             return _result(request_id, _tool_result({"error": f"unknown tool: {name}"}, True))
         try:
-            return _result(request_id, _tool_result(handler(arguments)))
+            return _result(request_id, _tool_result(handler(_validate_tool_arguments(name, arguments))))
         except Exception as exc:
             return _result(request_id, _tool_result({"error": f"{type(exc).__name__}: {exc}"}, True))
     return _error(request_id, -32601, f"method not found: {method}")

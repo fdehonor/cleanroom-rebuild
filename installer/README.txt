@@ -1,4 +1,4 @@
-CLEANROOM REBUILD 0.5.0 — PUBLIC WINDOWS INSTALLER
+CLEANROOM REBUILD 0.6.0 — PUBLIC WINDOWS INSTALLER
 
 This installer may be used free of charge under its MIT License. Components it
 downloads retain their own licenses. Read THIRD-PARTY-NOTICES.md first.
@@ -15,6 +15,7 @@ What it installs
 - Codex, Claude Code, and Gemini CLI automatic task routing
 - A detailed shared LLM operating contract with provider-specific instructions
 - Sanitized external implementation workspaces and asynchronous live job events
+- Disposable Hyper-V Windows Sandbox implementation workers with attestations
 - Cancellation, resume, structured reviews, and automatic repair cycles
 - SBOM, repair, uninstall, redacted diagnostics, and optional signing tools
 
@@ -49,6 +50,15 @@ Requirements
 - Internet access (Ghidra and the AI runtime are large downloads)
 - Roughly 15 GB free before model weights; more if you download models
 
+Strong isolation requirements
+-----------------------------
+Release-producing agent and validation runs require a supported Windows 10/11 Pro, Enterprise,
+or Education with firmware virtualization and Windows Sandbox enabled. The installer
+checks these prerequisites but does not silently weaken the release gate. Run
+"Enable Secure Sandbox.cmd" as administrator, restart if requested, then run
+Test-CleanroomIsolation.ps1. Windows Home users must upgrade or configure an
+independently audited external sandbox wrapper.
+
 Optional local model download
 -----------------------------
 The default install configures LLM4Decompile and downloads model weights on first use.
@@ -81,12 +91,13 @@ Implementation agents run outside the analysis project with only the sanitized
 handoff and independent implementation files. Use `cleanroom_agent_cancel` and
 `cleanroom_agent_resume` for interrupted work.
 
-Directory separation is not an OS security boundary. High-risk and release-ready
-runs require an audited executable sandbox wrapper configured through
-`CLEANROOM_ENFORCED_SANDBOX_WRAPPER`; it must accept
-`--workspace <path> -- <command...>` and expose only the sanitized workspace.
-The engine runs a canary attestation before accepting the wrapper: workspace
-writes must work and reads from a sibling path must be denied.
+Directory separation is not an OS security boundary. By default, supported systems
+use a new disposable Hyper-V Windows Sandbox VM for every implementation or
+validation command. Only the sanitized workspace is writable. Runtime and minimal
+provider bootstrap credentials are read-only seeds; clipboard and device sharing
+are disabled. Provider API networking remains enabled. Runtime attestations are
+hashed into the evidence chain and are mandatory at the release gate. An audited
+external wrapper remains available for systems where Windows Sandbox cannot run.
 
 Maintenance
 -----------

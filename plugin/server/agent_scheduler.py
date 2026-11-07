@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -16,6 +17,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+
+from windows_sandbox import probe_windows_sandbox
 
 
 PROVIDER_ORDER = ("codex", "claude", "gemini")
@@ -114,8 +117,23 @@ def _attest_sandbox_wrapper(wrapper: Path) -> dict[str, Any]:
 
 
 def isolation_status() -> dict[str, Any]:
+    preference = os.environ.get("CLEANROOM_SANDBOX_BACKEND", "auto").strip().casefold()
+    if preference not in {"auto", "windows-sandbox", "external-wrapper", "none"}:
+        return {"backend": "misconfigured", "enforced": False, "reason": f"invalid CLEANROOM_SANDBOX_BACKEND value: {preference}"}
+    if preference in {"auto", "windows-sandbox"}:
+        capability = probe_windows_sandbox()
+        if capability["supported"]:
+            return {
+                "backend": "windows-sandbox-hyper-v",
+                "enforced": True,
+                "reason": "Hyper-V-isolated Windows Sandbox is available; each command must produce a runtime attestation",
+                "capability": capability,
+                "runtime_attestation_required": True,
+            }
+        if preference == "windows-sandbox":
+            return {"backend": "windows-sandbox-unavailable", "enforced": False, "reason": capability["reason"], "capability": capability}
     configured = os.environ.get("CLEANROOM_ENFORCED_SANDBOX_WRAPPER", "").strip()
-    if configured:
+    if configured and preference != "none":
         wrapper = Path(configured).expanduser().resolve()
         if wrapper.is_file():
             attributes = getattr(wrapper.lstat(), "st_file_attributes", 0)
@@ -126,12 +144,29 @@ def isolation_status() -> dict[str, Any]:
                 return {"backend": "external-enforced-wrapper", "enforced": True, "wrapper": str(wrapper), "attestation": attestation}
             return {"backend": "misconfigured", "enforced": False, "wrapper": str(wrapper), "reason": attestation["detail"], "attestation": attestation}
         return {"backend": "misconfigured", "enforced": False, "reason": f"sandbox wrapper does not exist: {wrapper}"}
-    return {"backend": "provider-sandbox-and-directory-separation", "enforced": False, "reason": "No OS-enforced sandbox wrapper is configured. Set CLEANROOM_ENFORCED_SANDBOX_WRAPPER to an audited wrapper that exposes only the sanitized workspace."}
+    if preference == "external-wrapper":
+        return {"backend": "misconfigured", "enforced": False, "reason": "CLEANROOM_SANDBOX_BACKEND requires an external wrapper, but CLEANROOM_ENFORCED_SANDBOX_WRAPPER is unset"}
+    reason = probe_windows_sandbox()["reason"] if preference == "auto" else "OS isolation was explicitly disabled"
+    return {"backend": "provider-sandbox-and-directory-separation", "enforced": False, "reason": reason + ". Release-producing runs remain blocked. On supported Windows editions, enable Windows Sandbox; otherwise configure an audited external wrapper."}
 
 
-def wrap_in_sandbox(command: list[str], workspace: Path) -> list[str]:
+def wrap_in_sandbox(command: list[str], workspace: Path, attestation_path: Path | None = None, timeout_seconds: int = 1800, working_directory: Path | None = None, credential_provider: str | None = None, read_only_workspace: bool = False, networking_enabled: bool = True) -> list[str]:
     isolation = isolation_status()
-    if isolation["enforced"]:
+    if isolation["backend"] == "windows-sandbox-hyper-v" and isolation["enforced"]:
+        wrapper = Path(__file__).resolve().with_name("windows_sandbox.py")
+        prefix = [sys.executable, str(wrapper), "--workspace", str(workspace), "--timeout", str(timeout_seconds)]
+        if attestation_path is not None:
+            prefix.extend(["--attestation", str(attestation_path)])
+        if working_directory is not None:
+            prefix.extend(["--working-directory", str(working_directory)])
+        if credential_provider is not None:
+            prefix.extend(["--credential-provider", credential_provider])
+        if read_only_workspace:
+            prefix.append("--read-only-workspace")
+        if not networking_enabled:
+            prefix.append("--disable-networking")
+        return [*prefix, "--", *command]
+    if isolation["backend"] == "external-enforced-wrapper" and isolation["enforced"]:
         return [isolation["wrapper"], "--workspace", str(workspace), "--", *command]
     return command
 
@@ -162,6 +197,8 @@ def choose_plan(task: str, risk: str = "medium", mode: str = "auto", time_budget
 
 
 def _atomic_json(path: Path, value: Any) -> None:
+    if isinstance(value, dict):
+        value = _seal_record(value)
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
     try:
@@ -174,6 +211,34 @@ def _atomic_json(path: Path, value: Any) -> None:
             os.unlink(temporary)
 
 
+def _integrity_key() -> bytes:
+    base = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or tempfile.gettempdir()) / "CleanroomRebuild"
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / "integrity.key"
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(os.urandom(32))
+    except FileExistsError:
+        pass
+    data = path.read_bytes()
+    if len(data) != 32:
+        raise RuntimeError("clean-room integrity key is invalid")
+    return data
+
+
+def _seal_record(value: dict[str, Any]) -> dict[str, Any]:
+    record = {key: item for key, item in value.items() if key != "integrity_hmac_sha256"}
+    payload = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    record["integrity_hmac_sha256"] = hmac.new(_integrity_key(), payload, hashlib.sha256).hexdigest()
+    return record
+
+
+def _record_integrity_valid(value: dict[str, Any]) -> bool:
+    supplied = value.get("integrity_hmac_sha256")
+    return isinstance(supplied, str) and hmac.compare_digest(supplied, _seal_record(value)["integrity_hmac_sha256"])
+
+
 def _event(run_root: Path, event_type: str, **fields: Any) -> None:
     record = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "type": event_type, **fields}
     with EVENT_LOCK:
@@ -184,6 +249,13 @@ def _event(run_root: Path, event_type: str, **fields: Any) -> None:
 def _copy_tree(source: Path, destination: Path) -> None:
     if not source.is_dir():
         return
+    source_attributes = getattr(source.lstat(), "st_file_attributes", 0)
+    if source.is_symlink() or source_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        raise ValueError(f"source root cannot be a symbolic link or reparse point: {source}")
+    if destination.exists():
+        destination_attributes = getattr(destination.lstat(), "st_file_attributes", 0)
+        if destination.is_symlink() or destination_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+            raise ValueError(f"destination root cannot be a symbolic link or reparse point: {destination}")
     for item in source.rglob("*"):
         attributes = getattr(item.lstat(), "st_file_attributes", 0)
         reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -208,6 +280,8 @@ def _isolated_root(project_root: Path, run_id: str) -> Path:
 
 def prepare_isolated_workspace(project_root: Path, run_id: str) -> Path:
     state = project_root / ".cleanroom"
+    if state.is_symlink() or (state.exists() and getattr(state.lstat(), "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+        raise ValueError("project .cleanroom state cannot be a symbolic link or reparse point")
     workspace = _isolated_root(project_root, run_id)
     if workspace.exists():
         raise ValueError(f"isolated workspace already exists: {workspace}")
@@ -215,6 +289,9 @@ def prepare_isolated_workspace(project_root: Path, run_id: str) -> Path:
     (workspace / "implementation").mkdir(parents=True, exist_ok=True)
     for source, destination in ((state / "CLEANROOM_WORKFLOW.md", workspace / ".cleanroom" / "CLEANROOM_WORKFLOW.md"), (state / "handoff" / "specification.json", workspace / ".cleanroom" / "handoff" / "specification.json"), (state / "implementation" / "plan.json", workspace / ".cleanroom" / "implementation-plan.json")):
         if source.is_file():
+            attributes = getattr(source.lstat(), "st_file_attributes", 0)
+            if source.is_symlink() or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+                raise ValueError(f"clean-room input cannot be a symbolic link or reparse point: {source}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
     _copy_tree(state / "implementation", workspace / "implementation")
@@ -225,8 +302,28 @@ def prepare_isolated_workspace(project_root: Path, run_id: str) -> Path:
 
 def _sync_implementation(workspace: Path, project_root: Path) -> None:
     destination = project_root / ".cleanroom" / "implementation"
-    destination.mkdir(parents=True, exist_ok=True)
-    _copy_tree(workspace / "implementation", destination)
+    parent = destination.parent
+    if parent.is_symlink() or getattr(parent.lstat(), "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+        raise ValueError("clean-room state root cannot be a symbolic link or reparse point")
+    staging = Path(tempfile.mkdtemp(prefix="implementation-staging-", dir=parent))
+    backup = parent / f"implementation-backup-{uuid.uuid4().hex}"
+    try:
+        _copy_tree(workspace / "implementation", staging)
+        if destination.exists():
+            attributes = getattr(destination.lstat(), "st_file_attributes", 0)
+            if destination.is_symlink() or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+                raise ValueError("implementation destination cannot be a symbolic link or reparse point")
+            os.replace(destination, backup)
+        os.replace(staging, destination)
+        if backup.exists():
+            shutil.rmtree(backup)
+    except Exception:
+        if backup.exists() and not destination.exists():
+            os.replace(backup, destination)
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _directory_size(path: Path) -> int:
@@ -240,7 +337,7 @@ def _enforce_workspace_budget(workspace: Path, maximum_mb: int) -> None:
         raise RuntimeError(f"isolated workspace exceeded disk budget: {actual} > {limit} bytes")
 
 
-def _command(provider: str, workspace: Path, prompt: str, max_turns: int) -> list[str]:
+def _command(provider: str, role: str, workspace: Path, prompt: str, max_turns: int, attestation_path: Path, timeout_seconds: int) -> list[str]:
     if provider == "codex":
         command = [shutil.which("codex") or "codex", "exec", "--json", "--ephemeral", "--sandbox", "workspace-write", "--cd", str(workspace), prompt]
     elif provider == "claude":
@@ -249,7 +346,8 @@ def _command(provider: str, workspace: Path, prompt: str, max_turns: int) -> lis
         command = [shutil.which("gemini") or "gemini", "-p", prompt, "--output-format", "json", "--approval-mode", "plan"]
     else:
         raise ValueError(f"unsupported provider: {provider}")
-    return wrap_in_sandbox(command, workspace)
+    read_only = role not in {"implementer", "remediation writer"}
+    return wrap_in_sandbox(command, workspace, attestation_path, timeout_seconds, credential_provider=provider, read_only_workspace=read_only, networking_enabled=True)
 
 
 def _provider_environment() -> dict[str, str]:
@@ -276,10 +374,11 @@ def _run_job(provider: str, role: str, workspace: Path, prompt: str, timeout_sec
     job_id = f"{provider}-{uuid.uuid4().hex[:8]}"
     stdout_path = run_root / f"{job_id}.stdout.log"
     stderr_path = run_root / f"{job_id}.stderr.log"
+    attestation_path = run_root / f"{job_id}.sandbox-attestation.json"
     try:
         stdout_stream = stdout_path.open("w", encoding="utf-8")
         stderr_stream = stderr_path.open("w", encoding="utf-8")
-        process = subprocess.Popen(_command(provider, workspace, prompt, max_turns), cwd=workspace, text=True, encoding="utf-8", errors="replace", stdout=stdout_stream, stderr=stderr_stream, env=_provider_environment(), shell=False, creationflags=flags, start_new_session=os.name != "nt")
+        process = subprocess.Popen(_command(provider, role, workspace, prompt, max_turns, attestation_path, timeout_seconds), cwd=workspace, text=True, encoding="utf-8", errors="replace", stdout=stdout_stream, stderr=stderr_stream, env=_provider_environment(), shell=False, creationflags=flags, start_new_session=os.name != "nt")
         _event(run_root, "provider_started", provider=provider, role=role, pid=process.pid)
         while process.poll() is None:
             if (run_root / "cancel.request").exists():
@@ -303,7 +402,17 @@ def _run_job(provider: str, role: str, workspace: Path, prompt: str, timeout_sec
         stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
         if status not in {"cancelled", "timed_out", "resource_exceeded"}:
             status = "completed" if process.returncode == 0 else "failed"
-        result = {"provider": provider, "role": role, "status": status, "exit_code": process.returncode, "elapsed_seconds": round(time.time() - started, 2), "stdout": stdout[-200000:], "stderr": stderr[-50000:]}
+        isolation = isolation_status()
+        attestation = None
+        if attestation_path.is_file():
+            try:
+                attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+            except Exception:
+                attestation = None
+        if isolation.get("runtime_attestation_required") and (not attestation or not attestation.get("enforced")):
+            status = "failed"
+            stderr += "\nRequired Windows Sandbox runtime attestation is missing or invalid."
+        result = {"provider": provider, "role": role, "status": status, "exit_code": process.returncode, "elapsed_seconds": round(time.time() - started, 2), "stdout": stdout[-200000:], "stderr": stderr[-50000:], "isolation_attestation": attestation, "isolation_attestation_sha256": hashlib.sha256(attestation_path.read_bytes()).hexdigest() if attestation_path.is_file() else None}
     except Exception as exc:
         active_process = locals().get("process")
         if active_process is not None:
@@ -398,6 +507,8 @@ def _write_status(run_root: Path, request: dict[str, Any], status: str, **fields
 
 def execute_request(request_path: Path) -> int:
     request = json.loads(request_path.read_text(encoding="utf-8"))
+    if not _record_integrity_valid(request):
+        raise ValueError("agent request integrity verification failed")
     project_root = Path(request["project_root"]).resolve()
     run_root = request_path.parent
     plan = request["plan"]
@@ -427,7 +538,8 @@ def execute_request(request_path: Path) -> int:
                 break
             _write_status(run_root, request, "running", phase=f"review-{cycle + 1}", jobs=jobs, review_cycles=review_cycles)
             cycle_jobs = []
-            with ThreadPoolExecutor(max_workers=min(len(reviewers), int(request.get("max_parallel_reviewers", 2)))) as pool:
+            concurrency = 1 if request.get("isolation", {}).get("backend") == "windows-sandbox-hyper-v" else min(len(reviewers), int(request.get("max_parallel_reviewers", 2)))
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 futures = {pool.submit(_run_job, item["provider"], item["role"], workspace, _review_prompt(common, item["role"]), timeout_seconds, int(request["max_turns"]), run_root): item for item in reviewers}
                 for future in as_completed(futures):
                     job = future.result()
@@ -464,7 +576,7 @@ def start_plan(project_root: str, plan: dict[str, Any], max_turns: int = 8, max_
     if not root.is_dir():
         raise ValueError("project_root must be an existing directory")
     isolation = isolation_status()
-    if require_enforced_isolation and not isolation["enforced"]:
+    if not isolation["enforced"]:
         raise RuntimeError(isolation["reason"])
     run_id = f"run-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     run_root = root / ".cleanroom" / "agents" / run_id
@@ -506,6 +618,8 @@ def read_run_status(project_root: str, run_id: str | None = None) -> dict[str, A
     if not target.is_dir():
         raise ValueError(f"agent run not found: {run_id}")
     status = json.loads((target / "status.json").read_text(encoding="utf-8")) if (target / "status.json").is_file() else {"run_id": target.name, "status": "unknown"}
+    if not _record_integrity_valid(status):
+        raise ValueError(f"agent status integrity verification failed: {target / 'status.json'}")
     events = []
     if (target / "events.jsonl").is_file():
         for line in (target / "events.jsonl").read_text(encoding="utf-8").splitlines()[-100:]:
@@ -552,6 +666,8 @@ def resume_run(project_root: str, run_id: str | None = None) -> dict[str, Any]:
     agents = Path(project_root).expanduser().resolve() / ".cleanroom" / "agents"
     old_root = _validated_run_root(agents, latest["run_id"])
     request = json.loads((old_root / "request.json").read_text(encoding="utf-8"))
+    if not _record_integrity_valid(request):
+        raise ValueError("agent request integrity verification failed")
     return start_plan(project_root, request["plan"], request["max_turns"], request.get("max_repair_cycles", 2), request.get("max_parallel_reviewers", 2), request.get("max_workspace_mb", 4096), bool(request.get("isolation", {}).get("enforced")))
 
 

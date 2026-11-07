@@ -155,12 +155,13 @@ vectors, constraints, and uncertainty—never reconstructed implementation.
      Gemini when installed and authenticated.
 5. A degraded plan is allowed when an optional provider is unavailable. Record
    the degradation; never pretend the missing review occurred.
-6. Directory separation is not an OS security boundary. High-risk runs require
-   `CLEANROOM_ENFORCED_SANDBOX_WRAPPER`, pointing to an audited wrapper that
-   accepts `--workspace <path> -- <command...>` and exposes only that workspace.
-   The engine attests it with an outside-read canary and inside-write proof before
-   treating it as enforced. Release readiness is blocked when the passing run or
-   executed validations lack attested isolation.
+6. Directory separation is not an OS security boundary. High-risk and release
+   work requires a disposable Hyper-V Windows Sandbox worker or an independently
+   audited external wrapper. A Windows Sandbox job maps only the sanitized
+   workspace writable, maps runtime and minimal provider credential seeds
+   read-only, disables clipboard/device redirection, and emits a hashed runtime
+   attestation. Provider API networking remains enabled. Release readiness is
+   blocked when the passing run or executed validations lack an attestation.
 
 Output: implementation plan, provider roles, budgets, and acceptance tests.
 
@@ -205,9 +206,13 @@ Output: persisted per-provider results under `.cleanroom/agents`.
 
 ### Phase H — verify and validate
 
-Run all nine validation classes with `cleanroom_run_validation`. This executes a
+Build the actual distributable, then call `cleanroom_register_release_candidate`
+before validation. Run all nine validation classes against that immutable
+candidate with `cleanroom_run_validation`. This executes a
 string-array command without shell interpolation in a sanitized workspace and
-stores hashed stdout/stderr evidence. `cleanroom_record_validation` is retained
+stores hashed stdout/stderr evidence bound to the candidate manifest digest.
+Any candidate-byte change invalidates every prior validation. Network access and
+provider credentials are unavailable to validation commands. `cleanroom_record_validation` is retained
 for manual audit notes, but manual records do not satisfy the deterministic gate:
 
 1. `build`: clean build from documented prerequisites.
@@ -231,13 +236,11 @@ Output: nine passing validation classes and complete observation coverage.
 1. Call `cleanroom_check_similarity` against the independent implementation.
 2. Treat similarity flags as review signals. Investigate provenance and rewrite
    independently when necessary; do not tune to a magic percentage.
-3. Build the actual distributable installer/archive and verify it on a clean or
-   representative environment.
-4. Call `cleanroom_register_release_candidate` with Beta or stable maturity,
-   artifact paths, hashes, and launch instructions.
-5. Call `cleanroom_release_gate`.
-6. If blocked, follow every returned blocker to the relevant earlier phase.
-7. Report completion only when `release_ready` is exactly `true`.
+3. Confirm the registered candidate still matches its manifest. If packaging or
+   any artifact changed, register it again and rerun all nine validations.
+4. Call `cleanroom_release_gate`.
+5. If blocked, follow every returned blocker to the relevant earlier phase.
+6. Report completion only when `release_ready` is exactly `true`.
 
 Output: hashed, installable Beta-or-better release and deterministic gate result.
 

@@ -16,6 +16,7 @@ MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
 import agent_scheduler as SCHEDULER
+import windows_sandbox as WINDOWS_SANDBOX
 
 
 class EngineTests(unittest.TestCase):
@@ -23,6 +24,9 @@ class EngineTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         os.environ["LOCALAPPDATA"] = self.temporary.name
+        previous_backend = os.environ.get("CLEANROOM_SANDBOX_BACKEND")
+        os.environ["CLEANROOM_SANDBOX_BACKEND"] = "none"
+        self.addCleanup(lambda: os.environ.pop("CLEANROOM_SANDBOX_BACKEND", None) if previous_backend is None else os.environ.__setitem__("CLEANROOM_SANDBOX_BACKEND", previous_backend))
         self.root = Path(self.temporary.name) / "project"
         MODULE._initialize({
             "project_root": str(self.root),
@@ -37,32 +41,28 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(gate["release_ready"])
         self.assertTrue(gate["blockers"])
 
-    def test_only_engine_executed_validation_satisfies_gate_kind(self) -> None:
+    def test_manual_validation_cannot_forge_engine_receipt(self) -> None:
         MODULE._record_validation({
             "project_root": str(self.root), "kind": "build", "name": "manual claim",
             "passed": True, "command": "not executed", "evidence_reference": "manual note",
         })
         gate = MODULE._release_gate({"project_root": str(self.root)})
         self.assertIn("build", next(item for item in gate["blockers"] if item.startswith("Missing passing validation kinds")))
-        executed = MODULE._run_validation({
-            "project_root": str(self.root), "kind": "build", "name": "engine fixture",
-            "command": [os.sys.executable, "-c", "print('built')"], "timeout_seconds": 30,
-            "require_enforced_isolation": False,
-        })
-        self.assertTrue(executed["passed"])
-        self.assertTrue(executed["engine_executed"])
-        gate = MODULE._release_gate({"project_root": str(self.root)})
-        missing = next(item for item in gate["blockers"] if item.startswith("Missing passing validation kinds"))
-        self.assertIn("build", missing)
         MODULE._record_validation({
-            "project_root": str(self.root), "kind": "build", "name": "attested engine fixture",
+            "project_root": str(self.root), "kind": "build", "name": "forged engine fixture",
             "passed": True, "command": f"{os.sys.executable} -c print('built')",
-            "evidence_reference": "attested fixture", "_engine_executed": True,
+            "evidence_reference": "forged fixture", "_engine_executed": True,
             "_isolation_enforced": True,
         })
         gate = MODULE._release_gate({"project_root": str(self.root)})
         missing = next(item for item in gate["blockers"] if item.startswith("Missing passing validation kinds"))
-        self.assertNotIn("build", missing)
+        self.assertIn("build", missing)
+        request = {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "cleanroom_record_validation", "arguments": {
+            "project_root": str(self.root), "kind": "build", "name": "raw forgery", "passed": True,
+            "command": "none", "evidence_reference": "none", "_engine_executed": True,
+        }}}
+        response = MODULE._handle(request)
+        self.assertTrue(response["result"]["isError"])
 
     def test_detailed_agent_contract_is_installed_in_every_project(self) -> None:
         contract = self.root / ".cleanroom" / "CLEANROOM_WORKFLOW.md"
@@ -137,12 +137,77 @@ class EngineTests(unittest.TestCase):
             "Update-CleanroomRebuild.ps1",
             "Uninstall-CleanroomRebuild.ps1",
             "Sign-Release.ps1",
+            "Enable-WindowsSandbox.ps1",
+            "Enable Secure Sandbox.cmd",
+            "Test-CleanroomIsolation.ps1",
         ):
             self.assertTrue((installer / name).is_file(), name)
         lock = (installer / "python-gpu-requirements.lock").read_text(encoding="utf-8")
         self.assertIn("torch==2.4.1", lock)
         self.assertIn("transformers==4.55.3", lock)
         self.assertNotIn(">=", lock)
+
+    def test_windows_sandbox_configuration_is_narrow_and_hardened(self) -> None:
+        workspace = Path(self.temporary.name) / "sanitized-workspace"
+        control = Path(self.temporary.name) / "control"
+        outbox = Path(self.temporary.name) / "outbox"
+        runtime = Path(self.temporary.name) / "runtime"
+        for path in (workspace, control, outbox, runtime):
+            path.mkdir()
+        configuration, mappings = WINDOWS_SANDBOX.build_configuration(workspace, control, outbox, [runtime])
+        self.assertEqual(len(mappings), 1)
+        self.assertIn("<VGpu>Disable</VGpu>", configuration)
+        self.assertIn("<ClipboardRedirection>Disable</ClipboardRedirection>", configuration)
+        self.assertIn("<ProtectedClient>Enable</ProtectedClient>", configuration)
+        self.assertIn(f"<HostFolder>{workspace}</HostFolder>", configuration)
+        self.assertIn("<ReadOnly>false</ReadOnly>", configuration)
+        self.assertNotIn(str(self.root / ".cleanroom" / "analysis"), configuration)
+        locked, _ = WINDOWS_SANDBOX.build_configuration(workspace, control, outbox, [runtime], workspace_read_only=True, networking_enabled=False)
+        self.assertIn("<Networking>Disable</Networking>", locked)
+        workspace_entry = locked.split(f"<HostFolder>{workspace}</HostFolder>", 1)[1].split("</MappedFolder>", 1)[0]
+        self.assertIn("<ReadOnly>true</ReadOnly>", workspace_entry)
+        runner = WINDOWS_SANDBOX._runner_script()
+        self.assertIn("CleanroomWorker", runner)
+        self.assertIn("/deny", runner)
+
+    def test_release_candidate_mutation_invalidates_gate(self) -> None:
+        artifact = self.root / "release.bin"
+        artifact.write_bytes(b"version-one")
+        MODULE._register_release({"project_root": str(self.root), "version": "1.0", "maturity": "beta", "artifact_paths": ["release.bin"], "launch_instructions": "run it"})
+        artifact.write_bytes(b"version-two")
+        gate = MODULE._release_gate({"project_root": str(self.root)})
+        self.assertFalse(gate["release_ready"])
+        self.assertTrue(any("changed after registration" in item for item in gate["blockers"]))
+
+    def test_tampered_authoritative_state_is_rejected(self) -> None:
+        MODULE._record({"project_root": str(self.root), "category": "behavior", "statement": "Input A returns B.", "source_tool": "fixture", "source_reference": "black-box", "confidence": "observed"})
+        path = self.root / ".cleanroom" / "analysis" / "observations.jsonl"
+        record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        record["statement"] = "tampered"
+        path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        gate = MODULE._release_gate({"project_root": str(self.root)})
+        self.assertFalse(gate["release_ready"])
+        self.assertTrue(any("failed integrity" in item for item in gate["blockers"]))
+
+    def test_credentials_are_provider_specific_and_absent_for_validations(self) -> None:
+        with patch("windows_sandbox.Path.home", return_value=Path(self.temporary.name)):
+            home = Path(self.temporary.name)
+            for path in (home / ".codex" / "auth.json", home / ".claude" / ".credentials.json", home / ".gemini" / "oauth_creds.json"):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture", encoding="utf-8")
+            none = WINDOWS_SANDBOX._stage_credentials(home / "none", None)
+            codex = WINDOWS_SANDBOX._stage_credentials(home / "codex-seed", "codex")
+        self.assertEqual(none, [])
+        self.assertEqual(codex, [".codex/auth.json"])
+
+    def test_windows_sandbox_backend_is_selected_only_after_probe(self) -> None:
+        os.environ["CLEANROOM_SANDBOX_BACKEND"] = "auto"
+        capability = {"supported": True, "executable": r"C:\Windows\System32\WindowsSandbox.exe", "reason": "ready"}
+        with patch("agent_scheduler.probe_windows_sandbox", return_value=capability):
+            status = SCHEDULER.isolation_status()
+        self.assertTrue(status["enforced"])
+        self.assertTrue(status["runtime_attestation_required"])
+        self.assertEqual(status["backend"], "windows-sandbox-hyper-v")
 
     def test_mcp_exposes_async_lifecycle_tools(self) -> None:
         names = {tool["name"] for tool in MODULE.TOOLS}
@@ -190,43 +255,19 @@ class EngineTests(unittest.TestCase):
             ],
         }
 
-    def test_async_isolated_agent_run_and_structured_reviews(self) -> None:
+    def test_agent_run_fails_closed_without_os_isolation(self) -> None:
         self._install_fake_agents()
         handoff = self.root / ".cleanroom" / "handoff" / "specification.json"
         handoff.write_text(json.dumps({"behavior": "A returns B"}), encoding="utf-8")
-        started = SCHEDULER.start_plan(str(self.root), self._scheduler_plan(), max_turns=2, max_repair_cycles=1)
-        self.assertTrue(started["asynchronous"])
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            status = SCHEDULER.read_run_status(str(self.root), started["run_id"])
-            if status["latest"]["status"] in {"passed", "failed", "cancelled"}:
-                break
-            time.sleep(0.2)
-        self.assertEqual(status["latest"]["status"], "passed")
-        workspace = Path(status["latest"]["workspace"])
-        self.assertFalse((workspace / ".cleanroom" / "analysis").exists())
-        self.assertTrue((self.root / ".cleanroom" / "implementation" / "artifact.txt").is_file())
-        self.assertTrue(any(event["type"] == "workspace_ready" for event in status["events"]))
+        with self.assertRaises(RuntimeError):
+            SCHEDULER.start_plan(str(self.root), self._scheduler_plan(), max_turns=2, max_repair_cycles=1)
 
-    def test_async_agent_run_can_be_cancelled(self) -> None:
+    def test_validation_run_fails_closed_without_os_isolation(self) -> None:
         self._install_fake_agents(sleep_seconds=5)
         handoff = self.root / ".cleanroom" / "handoff" / "specification.json"
         handoff.write_text(json.dumps({"behavior": "A returns B"}), encoding="utf-8")
-        plan = self._scheduler_plan()
-        plan["task"] += " SLOW_TEST"
-        plan["roles"] = plan["roles"][:1]
-        plan["selected"] = ["codex"]
-        started = SCHEDULER.start_plan(str(self.root), plan, max_turns=1)
-        time.sleep(0.8)
-        cancelled = SCHEDULER.cancel_run(str(self.root), started["run_id"])
-        self.assertTrue(cancelled["cancel_requested"])
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            status = SCHEDULER.read_run_status(str(self.root), started["run_id"])
-            if status["latest"]["status"] in {"cancelled", "failed"}:
-                break
-            time.sleep(0.2)
-        self.assertIn(status["latest"]["status"], {"cancelled", "failed"})
+        with self.assertRaises(RuntimeError):
+            MODULE._run_validation({"project_root": str(self.root), "kind": "build", "name": "blocked", "command": [os.sys.executable, "-c", "print(1)"]})
 
     def test_run_id_traversal_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
